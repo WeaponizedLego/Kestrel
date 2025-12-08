@@ -1,4 +1,4 @@
-# 📸 [Insert Chosen Name] (e.g., Magpie / Flashpoint)
+# 📸 Kestrel
 
 A high-performance, desktop-based photo management tool designed for curating massive libraries (20,000+ images) stored on slow HDDs or Network Drives.
 
