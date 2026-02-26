@@ -1,85 +1,121 @@
 # 📸 Kestrel
 
-A high-performance, desktop-based photo management tool designed for curating massive libraries (20,000+ images) stored on slow HDDs or Network Drives.
+Kestrel is a high-performance desktop photo manager built for very large libraries (20,000+ images), including collections stored on slow HDDs or network drives.
 
-## 🧠 The Philosophy: "Video Game Architecture"
+## Table of Contents
 
-Unlike traditional apps that query a database (SQL) for every scroll event, this application prioritizes **Interaction Latency** over **Startup Time** and **RAM Usage**.
+- [Philosophy: Video Game Architecture](#philosophy-video-game-architecture)
+- [Core Features](#core-features)
+  - [1) In-Memory Truth](#1-in-memory-truth)
+  - [2) Zero-Latency Interaction](#2-zero-latency-interaction)
+  - [3) Slow Drive Strategy](#3-slow-drive-strategy)
+  - [4) Persistence with `library.gob`](#4-persistence-with-librarygob)
+- [Tech Stack](#tech-stack)
+- [Runtime Flow](#runtime-flow)
+- [Getting Started (Dev)](#getting-started-dev)
+- [Coding Standards](#coding-standards)
+- [Troubleshooting / FAQ](#troubleshooting--faq)
 
-1.  **In-Memory Truth:** Upon launch, the entire application state (metadata + thumbnails) is loaded into RAM.
-    - _Target RAM:_ ~2GB - 4GB.
-    - _Target Startup:_ < 30 seconds.
-2.  **Zero Latency:** Once open, scrolling, sorting, and searching are instantaneous (0ms latency) because no disk I/O occurs during interaction.
-3.  **The "Slow Drive" Strategy:**
-    - **Raw Photos:** Live on your slow HDD/NAS.
-    - **Thumbnails:** Generated once and cached on your local fast SSD (and loaded into RAM).
-    - **Result:** You can browse a NAS folder at 60FPS. We only touch the network drive when you double-click to view the full image.
-4.  **Persistence:** State is saved to a compressed binary file (`library.gob`) on exit or manual sync.
+## Philosophy: Video Game Architecture
 
-## 🛠 Tech Stack
+Kestrel is designed like a game engine, not a traditional CRUD app.  
+The main goal is interaction speed after startup: smooth scrolling, sorting, and browsing without waiting on disk I/O.
 
-- **Frontend:** Vue 3 (Composition API) + Vite.
-- **Backend:** Go (Golang) - Handles the "Heavy Lifting" (Scanning, Hashing, Memory Management).
-- **Bridge:** [Wails v2](https://wails.io/) - Compiles Go + Vue into a single native binary.
-- **State:** Native Go Maps protected by `sync.RWMutex`.
+## Core Features
 
-## 🏗 Architecture Overview
+### 1) In-Memory Truth
 
-```mermaid
-graph LR
-    A["User UI (Vue 3)"] -->|Scrolls Grid| B("RAM Cache")
-    B -->|Returns Thumbnails Instantly| A
-    C["Go Backend"] -->|Scans| D["Slow HDD / NAS"]
-    C -->|Generates Thumbs| E["Local SSD Cache"]
-    C -->|Loads State| B
-    F["Action: Delete"] -->|Update Map| B
-    F -->|Background Task| D
-```
+**What it does**
+- Loads the active library state (metadata + thumbnails) into RAM.
+- Uses an in-memory map as the runtime source of truth.
 
-## 🗺️ Implementation Roadmap
+**Why it exists**
+- Eliminates repeated storage lookups during normal UI interaction.
+- Trades startup and memory cost for fast, consistent responsiveness.
 
-### Phase 1: The Skeleton 🚧
+**How it behaves in real usage**
+- Startup work is front-loaded.
+- Once loaded, common operations read from memory instead of querying disk.
+- Target profile remains high-memory, low-latency (`~2GB - 4GB`, startup target `< 30s`).
 
-- [ ] Install Go and Wails.
-- [ ] Initialize project: `wails init -n photo-manager -t vue`
-- [ ] Verify "Hello World" (Input text in Vue -\> Printed in Go Console).
+### 2) Zero-Latency Interaction
 
-### Phase 2: The Data Layer (The Brain) 🧠
+**What it does**
+- Keeps scroll/sort/search interaction on the in-memory dataset.
 
-- [ ] Create `structs.go`: Define `Photo` and `Library` structs (PascalCase).
-- [ ] Implement `LoadLibrary()`: Read `.gob` file from disk into a global RAM Map.
-- [ ] Implement `SaveLibrary()`: Write global RAM Map to disk.
+**Why it exists**
+- Disk and network drive latency are unpredictable and can cause UI stutter.
 
-### Phase 3: The Scanner (The Eyes) 👀
+**How it behaves in real usage**
+- Scrolling and navigation remain fluid because disk reads are not part of the interaction loop.
+- During browsing, no per-item database or disk queries are required.
 
-- [ ] Create `scanner.go`: Recursive walker using `filepath.WalkDir`.
-- [ ] **Worker Pool Pattern:** Use a fixed number of Goroutines to scan files (prevents OS file limit errors).
-- [ ] "New File" Logic: If file not in RAM Map -\> Add it.
-- [ ] "Missing File" Logic: If file in RAM Map but not on Disk -\> Mark as missing.
+### 3) Slow Drive Strategy
 
-### Phase 4: The Visuals (The Speed) ⚡
+**What it does**
+- Separates raw-photo storage from browsing-performance storage.
 
-- [ ] Implement Thumbnail Generator: Resize images to 300px JPEGs (using `disintegration/imaging`).
-- [ ] **Crucial:** Store thumbnail bytes in the In-Memory Map, _not_ alongside the source file.
-- [ ] Connect Wails to Vue: Send thumbnail data as Base64/Blob to the grid.
+**Why it exists**
+- Large libraries often live on slow storage (HDD/NAS), but browsing still needs to feel instant.
 
-### Phase 5: The Logic (The Cleaner) 🧹
+**How it behaves in real usage**
+- Raw photos stay on HDD/NAS.
+- Thumbnails are generated once, cached on a local SSD, and loaded into memory.
+- You browse quickly even when originals live on slow drives; full-resolution file access happens on open/view.
 
-- [ ] **Duplicate Detection Funnel:**
-  1.  Group by File Size (Instant).
-  2.  Hash first 4KB (Fast).
-  3.  Full Hash (Slow - only for collisions).
-- [ ] Implement "Delete/Move" actions in Go.
+### 4) Persistence with `library.gob`
 
-## 🚀 How to Run (Dev Mode)
+**What it does**
+- Saves application state to a compressed binary file (`library.gob`).
+
+**Why it exists**
+- Preserves computed/cached state between sessions.
+
+**How it behaves in real usage**
+- On startup, Kestrel restores state from persisted data.
+- On exit or manual sync, current state is written back.
+
+## Tech Stack
+
+- **Frontend:** Vue 3 (Composition API) + Vite
+- **Backend:** Go (Golang) for scanning, hashing, thumbnail workflow, and memory management
+- **Desktop Bridge:** [Wails v2](https://wails.io/)
+- **Concurrency Model:** Go maps protected by `sync.RWMutex`
+
+## Runtime Flow
+
+1. Launch app and load persisted state into memory.
+2. Interact with the library from the in-memory map for low-latency browsing.
+3. Access original files from HDD/NAS only when opening full-resolution images.
+4. Persist updated state on exit or manual sync to `library.gob`.
+
+## Getting Started (Dev)
+
+### Prerequisites
+
+- Go toolchain
+- Node.js and npm
+- Wails v2 CLI
+
+### Run in development mode
 
 ```bash
-# Run the app in "Live Reload" mode
 wails dev
 ```
 
-## 📝 Coding Standards
+## Coding Standards
 
-- **Go:** Idiomatic Go. Use `camelCase` for private variables and `PascalCase` for exported Wails methods and Structs.
-- **Concurrency:** ALWAYS use `sync.RWMutex` when accessing the `Library` map.
-- **Vue:** Use `<script setup lang="ts">`. Call Go functions directly from `wailsjs`.
+- **Go style:** `PascalCase` for exported methods/structs, `camelCase` for private helpers/variables.
+- **Concurrency rule:** Always guard shared library map access with `sync.RWMutex`.
+- **Frontend style:** Use Vue 3 `<script setup lang="ts">` and call Go bindings via `wailsjs`.
+
+## Troubleshooting / FAQ
+
+**Why is RAM usage high?**  
+Kestrel intentionally keeps metadata and thumbnails in memory to remove interaction-time I/O and keep navigation fast.
+
+**Why can startup feel heavier than browsing?**  
+Startup performs the expensive loading step up front so runtime interactions stay smooth afterward.
+
+**Why can opening a full image still be slower than scrolling?**  
+Browsing uses in-memory/thumbnail data, but opening full-resolution files may read from HDD/NAS on demand.
