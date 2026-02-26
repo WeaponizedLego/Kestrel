@@ -1,0 +1,75 @@
+name: Develop PR Go Reviewer
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  run-go-reviewer:
+    name: Run go-pr-reviewer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Run go-pr-reviewer agent
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+            echo "::error title=Missing COPILOT_GITHUB_TOKEN::Set repository secret COPILOT_GITHUB_TOKEN with Copilot Requests permission."
+            exit 1
+          fi
+
+          PROMPT=$(cat <<EOF
+          Review pull request #${PR_NUMBER} in ${GITHUB_REPOSITORY} using the go-pr-reviewer agent.
+          Base branch: ${BASE_BRANCH}
+          Head branch: ${HEAD_BRANCH}
+
+          Requirements:
+          - Review all changed files in this pull request.
+          - Follow the output format from go-pr-reviewer.agent.md.
+          - Provide Critical Issues, Important Issues, Suggestions, and Overall Assessment.
+          - Explicitly state whether the PR is ready to merge.
+          EOF
+          )
+
+          copilot --version
+          copilot --agent go-pr-reviewer --autopilot --yolo --max-autopilot-continues 8 --prompt "${PROMPT}" | tee go-pr-review.md
+
+          {
+            echo "## go-pr-reviewer output"
+            echo
+            cat go-pr-review.md
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if grep -q "\[CRITICAL\]" go-pr-review.md; then
+            echo "::error title=Critical review findings::go-pr-reviewer reported critical issues."
+            exit 1
+          fi

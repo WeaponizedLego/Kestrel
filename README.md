@@ -13,6 +13,7 @@ Kestrel is a high-performance desktop photo manager built for very large librari
 - [Tech Stack](#tech-stack)
 - [Runtime Flow](#runtime-flow)
 - [Getting Started (Dev)](#getting-started-dev)
+- [Gitflow CI Enforcement](#gitflow-ci-enforcement)
 - [Coding Standards](#coding-standards)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
 
@@ -102,6 +103,25 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 ```bash
 wails dev
 ```
+
+## Gitflow CI Enforcement
+
+This repository includes CI workflows to enforce strict Gitflow pull-request flow:
+
+- `gitflow-guard` (`.github/workflows/gitflow-guard.yml`)
+- `develop-pr-go-reviewer` (`.github/workflows/develop-pr-go-reviewer.yml`)
+
+### Required repository settings
+
+To enforce this strictly, configure branch protection (or rulesets) for `develop` and `main`:
+
+1. Require a pull request before merging.
+2. Block direct pushes (including admins if you want absolute enforcement).
+3. Require status checks to pass before merge.
+4. Mark these checks as required:
+   - **Gitflow Guard / Validate Gitflow branch mapping**
+   - **Develop PR Go Reviewer / Run go-pr-reviewer**
+5. Add repository secret `COPILOT_GITHUB_TOKEN` with the **Copilot Requests** permission.
 
 ## Coding Standards
 

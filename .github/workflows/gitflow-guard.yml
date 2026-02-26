@@ -1,0 +1,54 @@
+name: Gitflow Guard
+
+on:
+  pull_request:
+    branches:
+      - develop
+      # - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - ready_for_review
+
+permissions:
+  contents: read
+
+jobs:
+  validate-gitflow:
+    name: Validate Gitflow branch mapping
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch against target branch
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          echo "Checking Gitflow mapping: ${HEAD_BRANCH} -> ${BASE_BRANCH}"
+
+          case "${BASE_BRANCH}" in
+            develop)
+              if [[ "${HEAD_BRANCH}" =~ ^(feature|release|hotfix)/.+$ ]]; then
+                echo "Allowed mapping for develop."
+              else
+                echo "::error title=Gitflow violation::PRs into develop must come from feature/*, release/*, or hotfix/*."
+                echo "::error title=Gitflow violation::Received head branch: ${HEAD_BRANCH}"
+                exit 1
+              fi
+              ;;
+            main)
+              if [[ "${HEAD_BRANCH}" =~ ^(release|hotfix)/.+$ ]]; then
+                echo "Allowed mapping for main."
+              else
+                echo "::error title=Gitflow violation::PRs into main must come from release/* or hotfix/*."
+                echo "::error title=Gitflow violation::Received head branch: ${HEAD_BRANCH}"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=Gitflow violation::Unsupported base branch: ${BASE_BRANCH}"
+              exit 1
+              ;;
+          esac
