@@ -10,10 +10,11 @@ Before generating or reviewing code, **consult the referenced design documents**
 
 **CRITICAL:** This application does NOT work like a standard CRUD app. It works like a game engine.
 
-1. **In-Memory Truth:** The entire application state (Library, Metadata, Thumbnails) lives in RAM (`map[string]*Photo`) protected by `sync.RWMutex`.
-2. **Zero-Latency Interaction:** We NEVER query the disk during scrolling or user interaction. We only read from the in-memory map.
-3. **Persistence Strategy:** We load a compressed binary (`.gob`) at startup and save it on exit.
-4. **Concurrency:** All access to the global map must be protected by `sync.RWMutex`. Use worker pools (`runtime.NumCPU()`), not one goroutine per file.
+1. **In-Memory Truth:** All metadata lives in RAM (`map[string]*Photo`) protected by `sync.RWMutex`. Thumbnails are served from a memory-budgeted LRU cache backed by a packed disk file (`thumbs.pack`).
+2. **Zero-Latency Interaction:** We NEVER query the disk for metadata during scrolling. Metadata reads hit the in-memory map. Thumbnail reads hit the LRU cache (RAM) with a pre-fetcher loading ahead of the viewport.
+3. **Persistence Strategy:** Two-file split: `library_meta.gob` (metadata, loaded synchronously at startup) + `thumbs.pack` (thumbnails, loaded progressively by the pre-fetcher).
+4. **Tiered Scaling:** For small libraries (< ~200K photos), all thumbnails fit in RAM (eager mode). For large libraries (up to 1M+), a priority-aware LRU cache evicts least-important thumbnails while pinning the viewport.
+5. **Concurrency:** All access to the metadata map must be protected by `sync.RWMutex`. Use worker pools (`runtime.NumCPU()`), not one goroutine per file.
 
 ---
 
@@ -63,8 +64,8 @@ Kestrel targets **Wails v3** (alpha). When generating code:
 
 **Always consult these when generating or reviewing code:**
 
-| Document | Covers |
-|---|---|
-| [`docs/system-design.md`](../docs/system-design.md) | Architecture, data flow, package structure, concurrency patterns, persistence, Wails v3 integration, performance targets |
-| [`docs/ui-design.md`](../docs/ui-design.md) | Vue 3 + Wails v3 frontend patterns, component hierarchy, state management, thumbnail strategy, performance rules |
+| Document                                              | Covers                                                                                                                            |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| [`docs/system-design.md`](../docs/system-design.md)   | Architecture, data flow, package structure, concurrency patterns, persistence, Wails v3 integration, performance targets          |
+| [`docs/ui-design.md`](../docs/ui-design.md)           | Vue 3 + Wails v3 frontend patterns, component hierarchy, state management, thumbnail strategy, performance rules                  |
 | [`docs/go-readability.md`](../docs/go-readability.md) | Function length limits, naming conventions, comment rules, error handling, interface design, testing standards, file organization |

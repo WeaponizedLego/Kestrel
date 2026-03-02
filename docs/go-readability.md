@@ -61,13 +61,13 @@ func ProcessPhoto(path string) (*Photo, error) {
 
 ### Naming by Scope
 
-| Scope | Style | Example |
-|---|---|---|
-| Exported type / func | `PascalCase` | `type PhotoLibrary struct`, `func LoadLibrary()` |
-| Unexported type / func | `camelCase` | `type photoIndex struct`, `func computeHash()` |
-| Local variable | `camelCase`, descriptive | `thumbnailBytes`, `scanResults` |
-| Constant | `PascalCase` if exported, `camelCase` if not | `MaxThumbnailSize`, `defaultBufferSize` |
-| Interface | Name by behavior, often `-er` suffix | `Scanner`, `Persister`, `PhotoProvider` |
+| Scope                  | Style                                        | Example                                          |
+| ---------------------- | -------------------------------------------- | ------------------------------------------------ |
+| Exported type / func   | `PascalCase`                                 | `type PhotoLibrary struct`, `func LoadLibrary()` |
+| Unexported type / func | `camelCase`                                  | `type photoIndex struct`, `func computeHash()`   |
+| Local variable         | `camelCase`, descriptive                     | `thumbnailBytes`, `scanResults`                  |
+| Constant               | `PascalCase` if exported, `camelCase` if not | `MaxThumbnailSize`, `defaultBufferSize`          |
+| Interface              | Name by behavior, often `-er` suffix         | `Scanner`, `Persister`, `PhotoProvider`          |
 
 ### Receiver Names
 
@@ -102,7 +102,7 @@ func (l *Library) AddPhoto(p *Photo) { ... }
 
 ### Inline Comments
 
-- Write **"why" comments**, not "what" comments. The code shows *what*; the comment explains *why*.
+- Write **"why" comments**, not "what" comments. The code shows _what_; the comment explains _why_.
 - If you need a "what" comment, the code should probably be refactored for clarity.
 
 ```go
@@ -154,7 +154,7 @@ func (s *ScannerService) FullScan(root string) error {
 
 ### The Wrap Rule
 
-Always wrap errors with context describing *what you were trying to do*:
+Always wrap errors with context describing _what you were trying to do_:
 
 ```go
 if err != nil {
@@ -200,15 +200,16 @@ type Photo struct {
     Path string
     Hash string
 
-    // Metadata
-    Width    int
-    Height   int
-    TakenAt  time.Time
+    // Metadata (persisted to library_meta.gob)
+    Width      int
+    Height     int
+    TakenAt    time.Time
     CameraMake string
-
-    // Runtime cache (not persisted)
-    Thumbnail []byte
 }
+
+// Note: Thumbnail bytes are NOT stored on the Photo struct.
+// They live in the ThumbnailProvider (LRU cache backed by thumbs.pack).
+// See docs/system-design.md → Thumbnail Cache Architecture.
 
 func NewPhoto(path, hash string) *Photo {
     return &Photo{
