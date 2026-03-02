@@ -61,13 +61,19 @@ Structure your review as follows:
 - [ ] Have I traced the main execution paths?
 - [ ] Have I considered edge cases and error conditions?
 - [ ] Have I checked against the project's copilot-instructions.md?
+- [ ] Have I checked against docs/go-readability.md for style and readability?
+- [ ] Have I checked against docs/system-design.md for architecture compliance?
 - [ ] Are my recommendations specific and actionable?
 - [ ] Have I distinguished between critical and non-critical issues?
 - [ ] Have I provided rationale for each comment?
 
 **When Reviewing Against copilot-instructions.md:**
-- First, examine the file to understand project-specific rules
-- Check if code changes violate any established patterns or conventions
+- First, examine `.github/copilot-instructions.md` to understand project philosophy and rules
+- Then consult the referenced design documents for detailed standards:
+  - `docs/go-readability.md` — naming, function length, comments, error handling, testing
+  - `docs/system-design.md` — architecture patterns, concurrency model, package structure
+  - `docs/ui-design.md` — frontend patterns, state management, performance rules
+- Check if code changes violate any established patterns or conventions in these documents
 - Verify naming, structure, and approach align with documented preferences
 - Flag deviations as either critical (if enforced strictly) or suggestions (if guidelines)
 

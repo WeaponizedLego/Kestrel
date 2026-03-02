@@ -80,8 +80,12 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 
 - **Frontend:** Vue 3 (Composition API) + Vite
 - **Backend:** Go (Golang) for scanning, hashing, thumbnail workflow, and memory management
-- **Desktop Bridge:** [Wails v2](https://wails.io/)
+- **Desktop Bridge:** [Wails v3](https://v3alpha.wails.io/) (alpha — see note below)
 - **Concurrency Model:** Go maps protected by `sync.RWMutex`
+
+> **Why Wails v3 alpha?** Wails v3 brings a procedural API, true multi-window support, and a
+> cleaner service-based binding model. This project's development timeline extends well beyond
+> the expected Wails v3 stable release, so we build on v3 from the start to avoid a future migration.
 
 ## Runtime Flow
 
@@ -94,15 +98,23 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 
 ### Prerequisites
 
-- Go toolchain
-- Node.js and npm
-- Wails v2 CLI
+- Go toolchain (1.22+)
+- Node.js (22+) and npm
+- [Wails v3 CLI](https://v3alpha.wails.io/getting-started/installation/)
 
 ### Run in development mode
 
 ```bash
-wails dev
+wails3 dev
 ```
+
+## Documentation
+
+Detailed design documents live in the [`docs/`](docs/) folder:
+
+- **[System Design](docs/system-design.md)** — Architecture, data flow, package structure, concurrency patterns, persistence strategy
+- **[UI Design](docs/ui-design.md)** — Frontend architecture, component hierarchy, Wails v3 integration patterns
+- **[Go Readability](docs/go-readability.md)** — Code style, naming, comments, testing, and readability standards
 
 ## Gitflow CI Enforcement
 
