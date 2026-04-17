@@ -12,7 +12,7 @@ import {
 import { apiGet, apiPost, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc, onThumbnailReady } from '../transport/thumbs'
-import { selectedFolder } from '../transport/selection'
+import { selectedFolder, cellSize } from '../transport/selection'
 import type { Photo } from '../types'
 
 // Lazy-loaded so the viewer JS/CSS only downloads when a user opens
@@ -21,7 +21,6 @@ import type { Photo } from '../types'
 const PhotoViewer = defineAsyncComponent(() => import('./PhotoViewer.vue'))
 const FolderPicker = defineAsyncComponent(() => import('./FolderPicker.vue'))
 
-const cellSize = 280 // 256 thumb + 24 padding; matches docs/ui-design
 const overscanRows = 2 // render a little above/below the viewport
 
 const folder = ref('')
@@ -55,10 +54,10 @@ const thumbVersion = ref(0)
 const touchedPaths = new Set<string>()
 
 const columns = computed(() => {
-  return Math.max(1, Math.floor(viewportWidth.value / cellSize))
+  return Math.max(1, Math.floor(viewportWidth.value / cellSize.value))
 })
 const totalRows = computed(() => Math.ceil(photos.value.length / columns.value))
-const totalHeight = computed(() => totalRows.value * cellSize)
+const totalHeight = computed(() => totalRows.value * cellSize.value)
 
 interface Cell {
   photo: Photo
@@ -70,10 +69,11 @@ interface Cell {
 const visibleCells = computed<Cell[]>(() => {
   if (!photos.value.length || !viewportHeight.value) return []
   const cols = columns.value
-  const firstRow = Math.max(0, Math.floor(scrollTop.value / cellSize) - overscanRows)
+  const pitch = cellSize.value
+  const firstRow = Math.max(0, Math.floor(scrollTop.value / pitch) - overscanRows)
   const lastRow = Math.min(
     totalRows.value,
-    Math.ceil((scrollTop.value + viewportHeight.value) / cellSize) + overscanRows,
+    Math.ceil((scrollTop.value + viewportHeight.value) / pitch) + overscanRows,
   )
   const cells: Cell[] = []
   for (let row = firstRow; row < lastRow; row++) {
@@ -83,8 +83,8 @@ const visibleCells = computed<Cell[]>(() => {
       cells.push({
         photo: photos.value[index],
         index,
-        x: col * cellSize,
-        y: row * cellSize,
+        x: col * pitch,
+        y: row * pitch,
       })
     }
   }
@@ -160,9 +160,34 @@ async function loadPhotos() {
 function updateMetrics() {
   const el = scroller.value
   if (!el) return
-  scrollTop.value = el.scrollTop
+  const newWidth = el.clientWidth
+  const oldWidth = viewportWidth.value
+  const pitch = cellSize.value
+
+  // When width changes (viewer opens/closes, window resize, slider),
+  // anchor on the first on-screen photo so the rebuilt grid keeps the
+  // user's place instead of snapping to a different row offset.
+  let anchorIndex = -1
+  if (oldWidth > 0 && newWidth !== oldWidth) {
+    const oldCols = Math.max(1, Math.floor(oldWidth / pitch))
+    const topRow = Math.floor(el.scrollTop / pitch)
+    anchorIndex = topRow * oldCols
+  }
+
   viewportHeight.value = el.clientHeight
-  viewportWidth.value = el.clientWidth
+  viewportWidth.value = newWidth
+  scrollTop.value = el.scrollTop
+
+  if (anchorIndex >= 0) {
+    nextTick(() => {
+      const scr = scroller.value
+      if (!scr) return
+      const newCols = Math.max(1, Math.floor(scr.clientWidth / cellSize.value))
+      const newRow = Math.floor(anchorIndex / newCols)
+      scr.scrollTop = newRow * cellSize.value
+      scrollTop.value = scr.scrollTop
+    })
+  }
 }
 
 let viewportPostDebounce: number | null = null
@@ -243,9 +268,10 @@ function onKeydown(e: KeyboardEvent) {
 function ensureVisible(index: number) {
   const el = scroller.value
   if (!el) return
+  const pitch = cellSize.value
   const row = Math.floor(index / columns.value)
-  const top = row * cellSize
-  const bottom = top + cellSize
+  const top = row * pitch
+  const bottom = top + pitch
   if (top < el.scrollTop) el.scrollTop = top
   else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight
 }
@@ -317,6 +343,25 @@ onBeforeUnmount(() => {
 // already persisted, so there's nothing to wait on.
 watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
   loadPhotos()
+})
+
+// When the user drags the size slider, anchor the top-visible photo so
+// resizing doesn't warp them to a different part of the library. We
+// snapshot the first on-screen photo index from the *old* pitch, then
+// scroll to that same photo's new row after computeds re-derive.
+watch(cellSize, (_newSize, oldSize) => {
+  const el = scroller.value
+  if (!el || !oldSize) return
+  const oldCols = Math.max(1, Math.floor(viewportWidth.value / oldSize))
+  const topRow = Math.floor(el.scrollTop / oldSize)
+  const anchorIndex = topRow * oldCols
+  nextTick(() => {
+    const pitch = cellSize.value
+    const cols = columns.value
+    const newRow = Math.floor(anchorIndex / cols)
+    el.scrollTop = newRow * pitch
+    updateMetrics()
+  })
 })
 </script>
 
@@ -404,7 +449,7 @@ watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
       >
       <div
         class="photo-grid__spacer"
-        :style="{ height: totalHeight + 'px' }"
+        :style="{ height: totalHeight + 'px', '--cell-size': cellSize + 'px' }"
       >
         <button
           v-for="cell in visibleCells"
@@ -434,6 +479,9 @@ watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
         @prev="openAt(viewerIndex - 1)"
         @next="openAt(viewerIndex + 1)"
       />
+      <aside v-else class="photo-grid__panel-empty" aria-hidden="true">
+        <p>Select a photo to see its details.</p>
+      </aside>
     </div>
 
     <Teleport to="body">
@@ -567,6 +615,22 @@ watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
   min-height: 0;
 }
 
+.photo-grid__panel-empty {
+  width: 360px;
+  flex-shrink: 0;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  box-shadow: var(--elev-raised);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  text-align: center;
+  font-size: var(--fs-body);
+}
+.photo-grid__panel-empty p { margin: 0; }
+
 .photo-grid__scroller {
   flex: 1;
   min-width: 0;
@@ -584,8 +648,8 @@ watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
   position: absolute;
   top: 0;
   left: 0;
-  width: 256px;
-  height: 256px;
+  width: calc(var(--cell-size, 280px) - 24px);
+  height: calc(var(--cell-size, 280px) - 24px);
   margin: 12px;
   padding: 0;
   border: 2px solid transparent;

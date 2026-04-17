@@ -7,9 +7,38 @@
 // Add state here only when two or more islands need to see the same
 // value. Anything that lives inside one island stays inside it.
 
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 
 // selectedFolder drives the photo grid's ?folder= filter. null means
 // "no filter — show all photos". Any absolute path asks the backend
 // to include that folder and its descendants.
 export const selectedFolder = ref<string | null>(null)
+
+// cellSize is the thumbnail grid pitch in pixels (thumb + padding).
+// Shared so the Toolbar slider can drive PhotoGrid's virtual layout.
+// 280 matches the original hardcoded default (256 thumb + 24 padding).
+export const CELL_SIZE_MIN = 140
+export const CELL_SIZE_MAX = 480
+export const CELL_SIZE_STEP = 20
+const CELL_SIZE_STORAGE_KEY = 'kestrel.cellSize'
+
+function loadPersistedCellSize(): number {
+  if (typeof localStorage === 'undefined') return 280
+  const raw = localStorage.getItem(CELL_SIZE_STORAGE_KEY)
+  if (!raw) return 280
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n)) return 280
+  return Math.min(CELL_SIZE_MAX, Math.max(CELL_SIZE_MIN, n))
+}
+
+export const cellSize = ref<number>(loadPersistedCellSize())
+
+if (typeof window !== 'undefined') {
+  watch(cellSize, (value) => {
+    try {
+      localStorage.setItem(CELL_SIZE_STORAGE_KEY, String(value))
+    } catch {
+      // Storage may be unavailable (private mode, quota); ignore.
+    }
+  })
+}

@@ -111,8 +111,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 <style scoped>
 .panel {
   width: 360px;
-  min-width: 320px;
-  max-width: 40vw;
+  flex-shrink: 0;
   background: var(--surface-raised);
   color: var(--text-primary);
   box-shadow: var(--elev-raised);
@@ -120,7 +119,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  flex-shrink: 0;
 }
 
 .panel__head {
