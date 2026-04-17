@@ -17,8 +17,9 @@ The guiding principle is **interaction speed after startup**: smooth scrolling, 
 | **Scanner / Workers** | Background goroutine pool that discovers files, extracts metadata, and generates thumbnails.                                                               |
 | **Persistence**       | Two-file split: `library_meta.gob` (metadata, loaded synchronously at startup) + `thumbs.pack` (thumbnails, loaded progressively).                         |
 | **Pre-fetcher**       | Background goroutine pool that predicts which thumbnails the user will need next and loads them from disk into the LRU cache.                              |
-| **Wails v3 Services** | Go structs registered as services — the bridge between Go and the Vue 3 frontend.                                                                          |
-| **Frontend**          | Vue 3 (Composition API) consuming Wails-generated TypeScript bindings.                                                                                     |
+| **HTTP + WS Server**  | Go `net/http` server on `127.0.0.1` exposing REST handlers for commands and a single WebSocket endpoint for server-pushed events.                          |
+| **Browser Shell**     | User's default browser, launched by the Go binary at startup. Frontend assets are embedded into the executable via `//go:embed`.                           |
+| **Frontend**          | Vue 3 (Composition API) with manual island hydration — a mostly-static HTML shell plus one Vue app per interactive region.                                 |
 
 ---
 
@@ -29,7 +30,7 @@ Startup
   └─▶ Load library_meta.gob → populate map[string]*Photo (< 5 sec for 1M photos)
         └─▶ Load thumbs.pack index (offsets only, not pixel data) (< 1 sec for 1M)
               └─▶ UI renders immediately with placeholder thumbnails
-                    └─▶ Frontend sends initial SetViewport(startIndex, endIndex)
+                    └─▶ Frontend POSTs /api/viewport with {startIndex, endIndex}
                           └─▶ Pre-fetcher loads visible thumbnails from disk (~50–200 ms)
                                 └─▶ Pre-fetcher continues with lookahead tiers in background
 
@@ -48,7 +49,7 @@ Background scan (async)
         └─▶ Each worker: hash file → extract EXIF → generate 256×256 JPEG thumbnail
               └─▶ Write metadata to in-memory map (Lock)
               └─▶ Append thumbnail to thumbs.pack + update index
-                    └─▶ Emit progress events to frontend via Wails
+                    └─▶ Broadcast progress events to all WS clients via the hub
 
 Shutdown / Manual sync
   └─▶ Serialize metadata map to library_meta.gob
@@ -63,21 +64,24 @@ Shutdown / Manual sync
 kestrel/
 ├── cmd/                    # Application entry point
 │   └── kestrel/
-│       └── main.go         # Wails v3 app creation & service registration
+│       └── main.go         # Wires internal packages, starts server, launches browser
 ├── internal/
 │   ├── library/            # In-memory photo store (map + RWMutex) + Photo struct
 │   ├── scanner/            # Directory walking & worker pool
 │   ├── thumbnail/          # ThumbnailProvider interface, LRU cache, pack file, pre-fetcher
 │   ├── metadata/           # EXIF / file metadata extraction
 │   ├── persistence/        # .gob serialization & deserialization (metadata only)
-│   └── platform/           # OS-specific helpers (paths, memory detection, file watchers)
-├── services/               # Wails v3 service structs (exported to frontend)
-│   ├── library_service.go
-│   ├── scanner_service.go
-│   └── viewer_service.go
-├── frontend/               # Vue 3 + Vite project
+│   ├── server/             # net/http server, router, WebSocket hub, auth-token middleware
+│   ├── api/                # HTTP handlers — thin wrappers over internal/ logic (JSON in/out)
+│   ├── assets/             # //go:embed frontend/dist/* + http.FS glue
+│   └── platform/           # OS-specific helpers (browser launch, paths, memory detection)
+├── frontend/               # Vue 3 + Vite project (produces static dist/ that Go embeds)
 │   ├── src/
-│   └── ...
+│   │   ├── islands/        # One entry per interactive region (PhotoGrid, Sidebar, …)
+│   │   ├── transport/      # Shared fetch client + WebSocket singleton
+│   │   └── shell/          # Static shell components rendered at build time
+│   ├── scripts/            # Build-time shell renderer (@vue/server-renderer)
+│   └── vite.config.ts      # Multi-entry build
 ├── docs/                   # This folder
 └── go.mod
 ```
@@ -85,7 +89,8 @@ kestrel/
 **Rules:**
 
 - `internal/` packages are never imported outside the module — enforce encapsulation.
-- `services/` contains only thin Wails-facing wrappers; business logic lives in `internal/`.
+- `internal/api/` handlers stay thin — decode, call into a domain package, encode. Business logic lives in `internal/library`, `internal/scanner`, `internal/thumbnail`, etc.
+- `internal/server/` owns the transport layer (routing, middleware, WS hub). Handlers don't import it; they're registered against its router.
 - One package = one clear responsibility. Avoid `utils/` or `helpers/` catch-all packages.
 
 ---
@@ -237,42 +242,101 @@ The index is small enough to reside fully in RAM: 1M entries × ~44 bytes ≈ 44
 
 ---
 
-## Wails v3 Integration
+## Localhost HTTP Server + Browser Shell
 
-Kestrel targets **Wails v3** (currently in alpha). Key differences from v2:
+Kestrel ships as a single Go executable. At startup it launches a `net/http` server on a
+loopback interface, opens the user's default browser at that URL, and serves the embedded Vue
+frontend plus a REST + WebSocket API.
 
-| v2                            | v3                                                                       |
-| ----------------------------- | ------------------------------------------------------------------------ |
-| Single `wails.Run()` call     | Procedural: `application.New()` → `app.NewWebviewWindow()` → `app.Run()` |
-| Context injected into structs | No context injection — plain Go structs as services                      |
-| Single window only            | Multi-window support                                                     |
-| Opaque build system           | Transparent, customizable build pipeline                                 |
-
-### Service Registration Pattern (v3)
+### Startup sequence
 
 ```go
-// A plain Go struct — no Wails-specific fields needed
-type LibraryService struct {
+func main() {
+    lib := library.New()
+    thumbs := thumbnail.New(...)
+    hub := server.NewHub()            // WebSocket broadcast hub
+
+    srv, url, err := server.Start(server.Config{
+        Bind:    "127.0.0.1:0",        // OS picks a free port
+        Assets:  assets.FS(),          // //go:embed frontend/dist/*
+        Hub:     hub,
+        Library: lib,
+        Thumbs:  thumbs,
+        Token:   auth.NewSessionToken(),
+    })
+    if err != nil {
+        log.Fatalf("starting server: %v", err)
+    }
+    defer srv.Shutdown(context.Background())
+
+    if err := platform.OpenBrowser(url); err != nil {
+        log.Printf("could not launch browser, open %s manually: %v", url, err)
+    }
+
+    waitForShutdownSignal()
+}
+```
+
+### Design rules
+
+- **Loopback only.** Always bind `127.0.0.1` (never `0.0.0.0`). The API is not meant to be
+  reachable from the network.
+- **Free port.** Bind `:0` and read the actual port back from the listener. Never hard-code
+  a port — collisions on developer machines are inevitable.
+- **Embedded assets.** Frontend is compiled in via `//go:embed frontend/dist/*` and served
+  through `http.FS`. In `--dev` mode the handler falls back to Vite's dev server.
+- **Per-run auth token.** Generate a random token at startup, inject it into the bootstrap
+  HTML, and require it as a header on every `/api/*` and `/ws` request. Stops other local
+  processes from probing the API.
+- **Same-origin WS.** Reject WebSocket upgrades whose `Origin` doesn't match the bound URL.
+- **Single instance.** On startup, try to acquire a lock file under the user config dir. If a
+  Kestrel is already running, re-open the browser at the existing instance's URL (stored
+  alongside the lock) and exit.
+- **Graceful shutdown.** Trap SIGINT/SIGTERM, flush persistence, close the hub, wait for
+  in-flight requests.
+
+### HTTP handler pattern
+
+Handlers live in `internal/api/` and are registered against the server's router. They're
+thin: decode the request, call into a domain package, encode the response.
+
+```go
+// internal/api/library.go
+type LibraryHandler struct {
     lib *library.Library
 }
 
-func NewLibraryService(lib *library.Library) *LibraryService {
-    return &LibraryService{lib: lib}
+func NewLibraryHandler(lib *library.Library) *LibraryHandler {
+    return &LibraryHandler{lib: lib}
 }
 
-// Exported methods become frontend-callable bindings
-func (s *LibraryService) GetPhotos() []*library.Photo {
-    return s.lib.AllPhotos()
+// GET /api/photos
+func (h *LibraryHandler) ListPhotos(w http.ResponseWriter, r *http.Request) {
+    photos := h.lib.AllPhotos()
+    writeJSON(w, http.StatusOK, photos)
+}
+```
+
+### WebSocket event hub
+
+Background work (scan, pre-fetcher, persistence) never talks to HTTP connections directly.
+It publishes typed events to the hub; the hub fan-outs to all connected WS clients.
+
+```go
+type Event struct {
+    Kind    string `json:"kind"`    // "scan:progress", "thumbnail:ready", "library:updated"
+    Payload any    `json:"payload"`
 }
 
-// Registration in main.go
-app := application.New(application.Options{
-    Name: "Kestrel",
-    Services: []application.Service{
-        application.NewService(NewLibraryService(lib)),
-    },
+// From a scanner worker:
+hub.Broadcast(Event{
+    Kind:    "scan:progress",
+    Payload: ScanProgress{Processed: n, Total: total},
 })
 ```
+
+The client subscribes once on page load via the shared WebSocket singleton (see
+`docs/ui-design.md`).
 
 ---
 
@@ -384,11 +448,11 @@ The thumbnail cache is not a simple LRU. Each cached entry carries a **priority 
 
 A background goroutine pool (2–4 workers) reads thumbnails from `thumbs.pack` and inserts them into the LRU cache ahead of the user's navigation.
 
-**Inputs (from the frontend via Wails events):**
+**Inputs (from the frontend via REST calls):**
 
-- `SetViewport(startIndex, endIndex)` — which thumbnails are currently visible
-- `ScrollDirection` — inferred from sequential `SetViewport` calls
-- `NavigateToFolder(path)` — user opened a folder in the sidebar
+- `POST /api/viewport` with `{startIndex, endIndex}` — which thumbnails are currently visible
+- Scroll direction — inferred server-side from sequential viewport calls
+- `POST /api/navigate` with `{folderPath}` — user opened a folder in the sidebar
 
 **Behaviour:**
 
@@ -396,7 +460,7 @@ A background goroutine pool (2–4 workers) reads thumbnails from `thumbs.pack` 
 2. When navigation changes (new folder), flush the work queue and reprioritize.
 3. Workers read from `thumbs.pack` using the in-memory index (seek + read, single syscall per thumbnail).
 4. Loaded thumbnails are inserted into the LRU cache, triggering eviction of lower-priority entries if at capacity.
-5. After insertion, emit a Wails event (`thumbnail:ready`) so the frontend can swap placeholders for real images.
+5. After insertion, publish a `thumbnail:ready` event on the WebSocket hub so the frontend can swap placeholders for real images.
 
 ### Pre-Sorted Indices
 

@@ -10,24 +10,79 @@
 | Concern              | Choice                                                                                                    |
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
 | **Framework**        | Vue 3 (Composition API with `<script setup lang="ts">`)                                                   |
-| **Build tool**       | Vite                                                                                                      |
-| **Desktop bridge**   | Wails v3 — auto-generated TypeScript bindings                                                             |
+| **Build tool**       | Vite (multi-entry: one bundle per island + a build-time-rendered static shell)                            |
+| **Hydration model**  | Manual islands — the HTML shell is static; each interactive region mounts its own Vue app                 |
+| **Transport**        | REST (`fetch`) for commands, a single WebSocket for server-pushed events                                  |
+| **Shell**            | User's default browser, opened by the Go binary at a loopback URL                                         |
 | **State management** | Vue `ref` / `reactive` for UI state; Go is the source of truth for library data                           |
-| **Styling**          | TBD — decide before first component implementation (options: Tailwind CSS, CSS Modules, plain scoped CSS) |
+| **Styling**          | Plain scoped CSS + design tokens — see [`visual-design.md`](visual-design.md) for the tactile system      |
 
 ---
 
-## Wails v3 Frontend Patterns
+## Island Hydration Model
 
-### Calling Go Services from Vue
+The build emits a **mostly-static HTML shell** plus one JS bundle per interactive region.
+Each region — `PhotoGrid`, `PhotoViewer`, `Sidebar`, `Toolbar`, `StatusBar` — is its own Vue
+app, mounted on a DOM node the shell placed for it. There is no root `<App>` hydrating the
+whole tree.
 
-Wails v3 generates TypeScript bindings for every exported method on registered Go services.
-Import them from the generated bindings directory and use `async/await`.
+**Why:** most of the chrome never re-renders. Paying the cost of hydrating the entire tree
+on every startup would be wasteful, and it gives us no practical benefit over mounting only
+what's interactive.
+
+### Island entry shape
+
+```ts
+// frontend/src/islands/PhotoGrid.entry.ts
+import { createApp } from 'vue'
+import PhotoGrid from './PhotoGrid.vue'
+
+const el = document.querySelector('[data-island="photo-grid"]')
+if (el) createApp(PhotoGrid).mount(el)
+```
+
+`vite.config.ts` is configured with one entry per island. The shell HTML is rendered at
+build time by a small Node script (`frontend/scripts/render-shell.ts`) using
+`@vue/server-renderer` on static shell components, and `<script type="module">` tags for
+each island are injected into the output.
+
+---
+
+## Calling the Go Backend
+
+### REST (commands, queries)
+
+A shared `api.ts` wraps `fetch`, attaches the session auth token (read from a meta tag the
+Go server injected into `index.html`), and serialises JSON.
+
+```ts
+// frontend/src/transport/api.ts
+const token = document.querySelector<HTMLMetaElement>('meta[name="kestrel-token"]')!.content
+
+export async function apiGet<T>(path: string): Promise<T> {
+  const res = await fetch(path, { headers: { 'X-Kestrel-Token': token } })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-Kestrel-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+```
+
+Consumed from an island:
 
 ```html
 <script setup lang="ts">
   import { ref, onMounted } from 'vue'
-  import { GetPhotos } from '../bindings/services/LibraryService'
+  import { apiGet } from '../transport/api'
+  import type { Photo } from '../types'
 
   const photos = ref<Photo[]>([])
   const loading = ref(true)
@@ -35,7 +90,7 @@ Import them from the generated bindings directory and use `async/await`.
 
   onMounted(async () => {
     try {
-      photos.value = await GetPhotos()
+      photos.value = await apiGet<Photo[]>('/api/photos')
     } catch (err) {
       error.value = `Failed to load library: ${err}`
       console.error(error.value)
@@ -46,17 +101,43 @@ Import them from the generated bindings directory and use `async/await`.
 </script>
 ```
 
-### Listening to Go Events
+### WebSocket (server-pushed events)
 
-Use Wails v3 event APIs to receive progress updates from background Go tasks (e.g., scanning).
+A singleton WebSocket in `frontend/src/transport/events.ts` connects once, auto-reconnects
+with backoff, and routes messages to typed listeners.
 
 ```ts
-import { Events } from '@wailsio/runtime'
+// frontend/src/transport/events.ts
+type Listener = (payload: any) => void
+const listeners = new Map<string, Set<Listener>>()
 
-Events.On('scan:progress', (data: { processed: number; total: number }) => {
+const token = document.querySelector<HTMLMetaElement>('meta[name="kestrel-token"]')!.content
+const ws = new WebSocket(`ws://${location.host}/ws?token=${token}`)
+
+ws.addEventListener('message', (ev) => {
+  const { kind, payload } = JSON.parse(ev.data)
+  listeners.get(kind)?.forEach((fn) => fn(payload))
+})
+
+export function onEvent(kind: string, fn: Listener) {
+  if (!listeners.has(kind)) listeners.set(kind, new Set())
+  listeners.get(kind)!.add(fn)
+  return () => listeners.get(kind)!.delete(fn)
+}
+```
+
+Usage inside an island:
+
+```ts
+import { onEvent } from '../transport/events'
+
+onEvent('scan:progress', (data: { processed: number; total: number }) => {
   scanProgress.value = data
 })
 ```
+
+Commands always go through REST; the WebSocket is for server-pushed events only
+(`scan:progress`, `thumbnail:ready`, `library:updated`, …).
 
 ---
 
@@ -88,8 +169,8 @@ App.vue
 
 | State type                          | Where it lives                            | Example                                            |
 | ----------------------------------- | ----------------------------------------- | -------------------------------------------------- |
-| **Library data** (photos, metadata) | Go in-memory map                          | `LibraryService.GetPhotos()`                       |
-| **Sorted / filtered views**         | Go — sort and filter in Go, return result | `LibraryService.GetPhotosSorted(field, order)`     |
+| **Library data** (photos, metadata) | Go in-memory map                          | `GET /api/photos`                                  |
+| **Sorted / filtered views**         | Go — sort and filter in Go, return result | `GET /api/photos?sort=date&order=desc`             |
 | **UI-only state**                   | Vue `ref` / `reactive`                    | `selectedPhotoId`, `sidebarOpen`, `gridColumns`    |
 | **Transient interaction state**     | Vue `ref`                                 | `isScrolling`, `isDragging`, `contextMenuPosition` |
 
@@ -106,14 +187,16 @@ Scan (Go background)
   └─▶ Generate thumbnail (256×256 JPEG)
         └─▶ Append to thumbs.pack (persistent disk cache)
               └─▶ Insert into LRU thumbnail cache (if budget allows)
-                    └─▶ Emit thumbnail:ready event to frontend
+                    └─▶ Broadcast thumbnail:ready on the WebSocket hub
 
 Frontend renders
-  └─▶ PhotoGrid sends SetViewport(startIndex, endIndex) to Go
+  └─▶ PhotoGrid POSTs /api/viewport with {startIndex, endIndex}
         └─▶ Go pre-fetcher loads visible + lookahead thumbnails into LRU cache
-              └─▶ Frontend receives thumbnails via binding call or event
+              └─▶ Frontend fetches each thumbnail from GET /api/thumbnail?path=...
                     └─▶ Cache hit → served from RAM (zero disk I/O)
                     └─▶ Cache miss → loaded from thumbs.pack on demand (< 5 ms from SSD)
+              └─▶ Late arrivals (cache miss filled by pre-fetcher) trigger a
+                  thumbnail:ready WS event so the grid can swap placeholders
 ```
 
 **Key rules:**
@@ -146,7 +229,7 @@ The photo grid must handle 20,000+ thumbnails without creating 20,000 DOM nodes.
 
 ## Performance Rules for Frontend Code
 
-1. **Never sort or filter in JavaScript.** Always call a Go service method that returns pre-sorted/filtered data.
+1. **Never sort or filter in JavaScript.** Always call a REST endpoint that returns pre-sorted/filtered data from the Go in-memory store.
 2. **Never hold the full photo list in multiple Vue refs.** Keep one canonical list; use computed properties for derived views.
 3. **Virtualize all large lists.** No exceptions for grids with > 100 items.
 4. **Debounce search input.** Wait 200–300 ms after the last keystroke before calling Go.

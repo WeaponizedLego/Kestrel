@@ -78,14 +78,17 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 
 ## Tech Stack
 
-- **Frontend:** Vue 3 (Composition API) + Vite
+- **Frontend:** Vue 3 (Composition API) + Vite, using **manual island hydration** (each interactive region mounts as its own Vue app on a mostly-static HTML shell)
 - **Backend:** Go (Golang) for scanning, hashing, thumbnail workflow, and memory management
-- **Desktop Bridge:** [Wails v3](https://v3alpha.wails.io/) (alpha — see note below)
+- **UI Shell:** Go `net/http` server bound to `127.0.0.1`, frontend assets embedded via `//go:embed`. On launch, the binary opens the user's **default browser** at the chosen port — no webview, no bundled Chromium.
+- **Transport:** REST/JSON for request-response, a single WebSocket endpoint for server-pushed events (scan progress, thumbnail-ready notifications)
+- **Distribution:** A **single cross-platform executable** per target (Linux/macOS/Windows, amd64/arm64). Pure Go, CGO-free, produced by `go build`.
 - **Concurrency Model:** Go maps protected by `sync.RWMutex`
 
-> **Why Wails v3 alpha?** Wails v3 brings a procedural API, true multi-window support, and a
-> cleaner service-based binding model. This project's development timeline extends well beyond
-> the expected Wails v3 stable release, so we build on v3 from the start to avoid a future migration.
+> **Why a localhost server + browser instead of a webview?** It keeps the toolchain trivial
+> (just `go build` and `vite build`), the output is one static binary with no platform SDKs or
+> Chromium payloads, and it gives us full flexibility over the UI stack without living under a
+> desktop-bridge framework's constraints.
 
 ## Runtime Flow
 
@@ -100,20 +103,37 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 
 - Go toolchain (1.22+)
 - Node.js (22+) and npm
-- [Wails v3 CLI](https://v3alpha.wails.io/getting-started/installation/)
 
 ### Run in development mode
 
+Dev runs two processes: Vite serves the frontend with HMR, and the Go binary serves the API + WebSocket. The frontend dev server proxies `/api` and `/ws` to the Go server.
+
 ```bash
-wails3 dev
+# Terminal 1 — frontend with HMR
+cd frontend && npm install && npm run dev
+
+# Terminal 2 — Go backend
+go run ./cmd/kestrel --dev
 ```
+
+In `--dev` mode the Go binary skips opening the browser (you point your own at the Vite URL) and disables asset embedding so it doesn't need a built `frontend/dist`.
+
+### Build the production binary
+
+```bash
+cd frontend && npm run build   # emits frontend/dist/
+cd ..
+go build -ldflags="-s -w" -o kestrel ./cmd/kestrel
+```
+
+The resulting `kestrel` binary embeds the built frontend, launches the default browser, and needs no external dependencies.
 
 ## Documentation
 
 Detailed design documents live in the [`docs/`](docs/) folder:
 
 - **[System Design](docs/system-design.md)** — Architecture, data flow, package structure, concurrency patterns, persistence strategy
-- **[UI Design](docs/ui-design.md)** — Frontend architecture, component hierarchy, Wails v3 integration patterns
+- **[UI Design](docs/ui-design.md)** — Frontend architecture, component hierarchy, island hydration model, REST/WebSocket transport
 - **[Go Readability](docs/go-readability.md)** — Code style, naming, comments, testing, and readability standards
 
 ## Gitflow CI Enforcement
@@ -139,7 +159,7 @@ To enforce this strictly, configure branch protection (or rulesets) for `develop
 
 - **Go style:** `PascalCase` for exported methods/structs, `camelCase` for private helpers/variables.
 - **Concurrency rule:** Always guard shared library map access with `sync.RWMutex`.
-- **Frontend style:** Use Vue 3 `<script setup lang="ts">` and call Go bindings via `wailsjs`.
+- **Frontend style:** Use Vue 3 `<script setup lang="ts">` and talk to Go via the shared `fetch` / WebSocket client in `frontend/src/transport/`.
 
 ## Troubleshooting / FAQ
 

@@ -1,6 +1,6 @@
 # 🤖 GitHub Copilot Instructions for Kestrel (Go Photo Manager)
 
-You are an expert Senior Go Engineer and Frontend Architect specializing in high-performance desktop applications using **Wails v3 (Go + Vue 3)**.
+You are an expert Senior Go Engineer and Frontend Architect specializing in high-performance desktop applications that ship as **a single Go executable serving a Vue 3 frontend over localhost HTTP + WebSocket, opened in the user's default browser**.
 
 Before generating or reviewing code, **consult the referenced design documents** listed at the bottom of this file.
 
@@ -36,16 +36,18 @@ Before generating or reviewing code, **consult the referenced design documents**
 
 ---
 
-## ⚙️ Wails v3 (Key Differences from v2)
+## ⚙️ HTTP Server + Browser Shell
 
-Kestrel targets **Wails v3** (alpha). When generating code:
+Kestrel is a single Go binary. When generating code:
 
-- Use the **procedural API**: `application.New()` → `app.NewWebviewWindow()` → `app.Run()`
-- Register Go structs as **services** — plain structs, no context injection
-- Frontend imports bindings from the Wails-generated `bindings/` directory
-- Use `Events.On()` / `Events.Emit()` for Go ↔ frontend communication
+- The backend is a stdlib `net/http` server bound to **`127.0.0.1`** only (never `0.0.0.0`), listening on an OS-picked free port.
+- Frontend assets live in `frontend/dist/` and are embedded with `//go:embed frontend/dist/*`, served via `http.FS`. In `--dev` mode the server falls back to Vite.
+- At startup the binary generates a per-run auth token, launches the user's default browser (OS-specific, in `internal/platform/`) at `http://127.0.0.1:PORT`, and requires that token on every `/api/*` and `/ws` request.
+- Put HTTP handlers in `internal/api/` (thin: decode → call domain package → encode). Register them against the router owned by `internal/server/`.
+- For server-pushed events (scan progress, thumbnail ready, library updates), broadcast a typed `Event{Kind, Payload}` through the WebSocket hub in `internal/server/`. Handlers and domain code never write to WS connections directly.
+- Commands always go through REST. The WebSocket is for server-to-client events only.
 
-> 📖 Full Wails v3 patterns and service registration examples: [`docs/system-design.md`](../docs/system-design.md)
+> 📖 Full server, handler, and hub patterns: [`docs/system-design.md`](../docs/system-design.md)
 
 ---
 
@@ -66,6 +68,7 @@ Kestrel targets **Wails v3** (alpha). When generating code:
 
 | Document                                              | Covers                                                                                                                            |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| [`docs/system-design.md`](../docs/system-design.md)   | Architecture, data flow, package structure, concurrency patterns, persistence, Wails v3 integration, performance targets          |
-| [`docs/ui-design.md`](../docs/ui-design.md)           | Vue 3 + Wails v3 frontend patterns, component hierarchy, state management, thumbnail strategy, performance rules                  |
+| [`docs/system-design.md`](../docs/system-design.md)   | Architecture, data flow, package structure, concurrency patterns, persistence, HTTP + WebSocket server integration, performance targets |
+| [`docs/ui-design.md`](../docs/ui-design.md)           | Vue 3 + Vite island hydration, REST/WebSocket transport, component hierarchy, state management, thumbnail strategy, performance rules   |
+| [`docs/visual-design.md`](../docs/visual-design.md)   | Dark neo-skeuomorphic tactile visual system: design tokens, elevation recipe, per-component visual specs, accessibility rules         |
 | [`docs/go-readability.md`](../docs/go-readability.md) | Function length limits, naming conventions, comment rules, error handling, interface design, testing standards, file organization |

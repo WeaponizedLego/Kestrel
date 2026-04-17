@@ -1,0 +1,255 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { apiGet, friendlyError } from '../transport/api'
+import { onEvent } from '../transport/events'
+import { selectedFolder } from '../transport/selection'
+
+interface FolderNode {
+  path: string
+  parent: string
+  name: string
+  count: number
+  total: number
+}
+interface Tree extends FolderNode {
+  children: Tree[]
+}
+
+const nodes = ref<FolderNode[]>([])
+const error = ref<string | null>(null)
+const loading = ref(false)
+// Using a ref<Set> means mutations don't re-trigger reactivity; we
+// replace the set on every toggle so Vue sees a fresh reference.
+const expanded = ref<Set<string>>(new Set())
+
+async function load() {
+  loading.value = true
+  error.value = null
+  try {
+    nodes.value = await apiGet<FolderNode[]>('/api/folders')
+    // On first successful load expand every root so the tree isn't a
+    // single collapsed row — feels broken otherwise.
+    if (expanded.value.size === 0 && nodes.value.length > 0) {
+      const next = new Set<string>()
+      for (const n of nodes.value) if (n.parent === '') next.add(n.path)
+      expanded.value = next
+    }
+  } catch (err) {
+    error.value = friendlyError(err)
+  } finally {
+    loading.value = false
+  }
+}
+
+// roots rebuilds the nested tree from the flat response. Stable order:
+// roots by path, children by name. The server already returns a
+// sorted flat list, so this is just O(N) bucketing into children.
+const roots = computed<Tree[]>(() => {
+  const byPath = new Map<string, Tree>()
+  for (const n of nodes.value) byPath.set(n.path, { ...n, children: [] })
+  const out: Tree[] = []
+  for (const t of byPath.values()) {
+    const parent = byPath.get(t.parent)
+    if (parent) parent.children.push(t)
+    else out.push(t)
+  }
+  const sortTree = (t: Tree) => {
+    t.children.sort((a, b) => a.name.localeCompare(b.name))
+    t.children.forEach(sortTree)
+  }
+  out.sort((a, b) => a.path.localeCompare(b.path))
+  out.forEach(sortTree)
+  return out
+})
+
+interface Row { node: Tree; depth: number }
+
+// Flatten the tree to rows currently visible (respecting expand
+// state). Iterative render via v-for is simpler than a self-recursive
+// component and avoids the Vue SFC footgun around name-based recursion.
+const rows = computed<Row[]>(() => {
+  const out: Row[] = []
+  const walk = (ts: Tree[], depth: number) => {
+    for (const t of ts) {
+      out.push({ node: t, depth })
+      if (t.children.length > 0 && expanded.value.has(t.path)) {
+        walk(t.children, depth + 1)
+      }
+    }
+  }
+  walk(roots.value, 0)
+  return out
+})
+
+function toggle(path: string) {
+  const next = new Set(expanded.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  expanded.value = next
+}
+
+function select(path: string | null) {
+  selectedFolder.value = path
+}
+
+let unsubUpdate: (() => void) | null = null
+onMounted(() => {
+  load()
+  // Scans fire library:updated — reload the tree so new folders
+  // appear without a manual refresh.
+  unsubUpdate = onEvent('library:updated', () => load())
+})
+onBeforeUnmount(() => unsubUpdate?.())
+</script>
+
+<template>
+  <nav class="sidebar">
+    <h2 class="sidebar__title">Library</h2>
+
+    <button
+      type="button"
+      class="sidebar__all"
+      :class="{ 'sidebar__all--active': selectedFolder === null }"
+      @click="select(null)"
+    >
+      All photos
+    </button>
+
+    <p v-if="error" class="sidebar__error" role="alert">{{ error }}</p>
+    <p v-else-if="loading && nodes.length === 0" class="sidebar__muted">Loading…</p>
+    <p
+      v-else-if="nodes.length === 0"
+      class="sidebar__muted"
+    >
+      Scan a folder to see it here.
+    </p>
+
+    <ul v-else class="sidebar__tree">
+      <li
+        v-for="{ node, depth } in rows"
+        :key="node.path"
+        class="sidebar__row"
+        :class="{ 'sidebar__row--active': selectedFolder === node.path }"
+        :style="{ paddingLeft: depth * 14 + 'px' }"
+      >
+        <button
+          type="button"
+          class="sidebar__chev"
+          :class="{ 'sidebar__chev--hidden': node.children.length === 0 }"
+          :aria-label="expanded.has(node.path) ? 'Collapse' : 'Expand'"
+          @click="toggle(node.path)"
+        >
+          {{ expanded.has(node.path) ? '▾' : '▸' }}
+        </button>
+        <button
+          type="button"
+          class="sidebar__label"
+          :title="node.path"
+          @click="select(node.path)"
+        >
+          <span class="sidebar__name">{{ node.name }}</span>
+          <span class="sidebar__count">{{ node.total }}</span>
+        </button>
+      </li>
+    </ul>
+  </nav>
+</template>
+
+<style scoped>
+.sidebar {
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+.sidebar__title {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sidebar__all {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text-primary);
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font: inherit;
+  margin-bottom: var(--space-2);
+}
+.sidebar__all:hover { background: var(--surface-raised); }
+.sidebar__all--active { background: var(--surface-raised); color: var(--accent); }
+
+.sidebar__muted {
+  color: var(--text-muted);
+  padding: var(--space-3);
+  font-size: var(--fs-body);
+  margin: 0;
+}
+.sidebar__error {
+  color: var(--danger);
+  padding: var(--space-3);
+  margin: 0;
+}
+
+.sidebar__tree { list-style: none; margin: 0; padding: 0; }
+.sidebar__row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.sidebar__row:hover { background: var(--surface-raised); }
+.sidebar__row--active { background: var(--surface-raised); color: var(--accent); }
+
+.sidebar__chev {
+  flex-shrink: 0;
+  width: 20px;
+  height: 24px;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0;
+  line-height: 1;
+}
+.sidebar__chev--hidden { visibility: hidden; pointer-events: none; }
+
+.sidebar__label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  background: transparent;
+  color: inherit;
+  border: none;
+  padding: var(--space-2);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.sidebar__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar__count {
+  color: var(--text-muted);
+  font-size: var(--fs-body);
+  flex-shrink: 0;
+}
+.sidebar__row--active .sidebar__count { color: var(--accent); }
+</style>
