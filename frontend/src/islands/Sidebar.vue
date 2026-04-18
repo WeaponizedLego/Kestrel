@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { apiGet, friendlyError } from '../transport/api'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { apiGet, apiPost, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { selectedFolder } from '../transport/selection'
+
+const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
 
 interface FolderNode {
   path: string
@@ -98,8 +100,71 @@ onMounted(() => {
   // Scans fire library:updated — reload the tree so new folders
   // appear without a manual refresh.
   unsubUpdate = onEvent('library:updated', () => load())
+  window.addEventListener('click', closeMenu)
+  window.addEventListener('keydown', onEscape)
 })
-onBeforeUnmount(() => unsubUpdate?.())
+onBeforeUnmount(() => {
+  unsubUpdate?.()
+  window.removeEventListener('click', closeMenu)
+  window.removeEventListener('keydown', onEscape)
+})
+
+// Right-click context menu state. Two phases: a tiny menu with one
+// action, then a tag-input popover when the user picks "Add tag". Both
+// anchor at the click coordinates so the popover drops where the
+// user's attention already is.
+const menuFolder = ref<string | null>(null)
+const menuX = ref(0)
+const menuY = ref(0)
+const tagDraft = ref<string[]>([])
+const tagError = ref<string | null>(null)
+const tagBusy = ref(false)
+const tagPopoverOpen = ref(false)
+const tagInputRef = ref<InstanceType<typeof TagInput> | null>(null)
+
+function openMenu(e: MouseEvent, path: string) {
+  e.preventDefault()
+  menuFolder.value = path
+  menuX.value = e.clientX
+  menuY.value = e.clientY
+  tagPopoverOpen.value = false
+}
+
+function closeMenu() {
+  menuFolder.value = null
+  tagPopoverOpen.value = false
+}
+
+function onEscape(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeMenu()
+}
+
+function startTagEntry() {
+  tagDraft.value = []
+  tagError.value = null
+  tagPopoverOpen.value = true
+  nextTick(() => tagInputRef.value?.focus())
+}
+
+async function applyTags() {
+  if (!menuFolder.value || tagDraft.value.length === 0) {
+    closeMenu()
+    return
+  }
+  tagBusy.value = true
+  tagError.value = null
+  try {
+    await apiPost<{ updated: number }>('/api/folder-tags', {
+      folder: menuFolder.value,
+      tags: tagDraft.value,
+    })
+    closeMenu()
+  } catch (err) {
+    tagError.value = friendlyError(err)
+  } finally {
+    tagBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -131,6 +196,7 @@ onBeforeUnmount(() => unsubUpdate?.())
         class="sidebar__row"
         :class="{ 'sidebar__row--active': selectedFolder === node.path }"
         :style="{ paddingLeft: depth * 14 + 'px' }"
+        @contextmenu="openMenu($event, node.path)"
       >
         <button
           type="button"
@@ -152,6 +218,60 @@ onBeforeUnmount(() => unsubUpdate?.())
         </button>
       </li>
     </ul>
+
+    <Teleport to="body">
+      <div
+        v-if="menuFolder && !tagPopoverOpen"
+        class="sidebar__menu"
+        :style="{ left: menuX + 'px', top: menuY + 'px' }"
+        role="menu"
+        @click.stop
+      >
+        <button
+          type="button"
+          class="sidebar__menu-item"
+          role="menuitem"
+          @click="startTagEntry"
+        >
+          Add tag to all photos in folder…
+        </button>
+      </div>
+
+      <div
+        v-if="menuFolder && tagPopoverOpen"
+        class="sidebar__popover"
+        :style="{ left: menuX + 'px', top: menuY + 'px' }"
+        role="dialog"
+        aria-label="Apply tags to folder"
+        @click.stop
+        @keydown.enter="applyTags"
+      >
+        <p class="sidebar__popover-title" :title="menuFolder">
+          Tag all photos in <span class="sidebar__popover-path">{{ menuFolder }}</span>
+        </p>
+        <TagInput
+          ref="tagInputRef"
+          v-model="tagDraft"
+          placeholder="Add tag…"
+          aria-label="Tags to apply"
+        />
+        <p v-if="tagError" class="sidebar__popover-error" role="alert">{{ tagError }}</p>
+        <div class="sidebar__popover-actions">
+          <button
+            type="button"
+            class="sidebar__popover-btn"
+            @click="closeMenu"
+            :disabled="tagBusy"
+          >Cancel</button>
+          <button
+            type="button"
+            class="sidebar__popover-btn sidebar__popover-btn--primary"
+            @click="applyTags"
+            :disabled="tagBusy || tagDraft.length === 0"
+          >{{ tagBusy ? 'Applying…' : 'Apply' }}</button>
+        </div>
+      </div>
+    </Teleport>
   </nav>
 </template>
 
@@ -252,4 +372,76 @@ onBeforeUnmount(() => unsubUpdate?.())
   flex-shrink: 0;
 }
 .sidebar__row--active .sidebar__count { color: var(--accent); }
+
+.sidebar__menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  background: var(--surface-raised);
+  border: var(--border-thin) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-overlay);
+  padding: var(--space-2);
+}
+.sidebar__menu-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text-primary);
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+}
+.sidebar__menu-item:hover { background: var(--surface-inset); color: var(--accent); }
+
+.sidebar__popover {
+  position: fixed;
+  z-index: 1000;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  background: var(--surface-raised);
+  border: var(--border-thin) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-overlay);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.sidebar__popover-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar__popover-path { color: var(--text-primary); }
+.sidebar__popover-error { color: var(--danger); margin: 0; font-size: var(--fs-body); }
+.sidebar__popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.sidebar__popover-btn {
+  background: transparent;
+  color: var(--text-primary);
+  border: var(--border-thin) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  font: inherit;
+}
+.sidebar__popover-btn:hover:not(:disabled) { border-color: var(--accent); }
+.sidebar__popover-btn:disabled { color: var(--text-muted); cursor: not-allowed; }
+.sidebar__popover-btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: var(--elev-raised);
+}
+.sidebar__popover-btn--primary:hover:not(:disabled) { background: var(--accent-hover); }
+.sidebar__popover-btn--primary:disabled { background: #4A3A30; box-shadow: none; }
 </style>

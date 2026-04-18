@@ -12,7 +12,18 @@ import {
 import { apiGet, apiPost, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc, onThumbnailReady } from '../transport/thumbs'
-import { selectedFolder, cellSize } from '../transport/selection'
+import {
+  selectedFolder,
+  cellSize,
+  selectedPaths,
+  anchorPath,
+  clearSelection,
+  selectOnly,
+  selectRange,
+  toggleSelection,
+  addPathsToSelection,
+} from '../transport/selection'
+import { resyncing, runResync } from '../transport/resync'
 import type { Photo } from '../types'
 
 // Lazy-loaded so the viewer JS/CSS only downloads when a user opens
@@ -20,6 +31,8 @@ import type { Photo } from '../types'
 // dynamic import".
 const PhotoViewer = defineAsyncComponent(() => import('./PhotoViewer.vue'))
 const FolderPicker = defineAsyncComponent(() => import('./FolderPicker.vue'))
+const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
+const SelectionSummary = defineAsyncComponent(() => import('../components/SelectionSummary.vue'))
 
 const overscanRows = 2 // render a little above/below the viewport
 
@@ -103,17 +116,21 @@ const viewerPhoto = computed<Photo | null>(() =>
 // composes query params and debounces the search typing.
 const sortKey = ref<'name' | 'date' | 'size'>('name')
 const sortOrder = ref<'asc' | 'desc'>('asc')
-const search = ref('')
+const searchTokens = ref<string[]>([])
+const searchMode = ref<'all' | 'any'>('all')
 const searchDebounced = ref('')
 const searchDebounceMs = 250
 
+// Tokens are committed by TagInput (space/Enter/blur), so there's no
+// per-keystroke flood to debounce. The timer still cushions rapid
+// add/remove bursts.
 let searchTimer: number | null = null
-watch(search, (value) => {
+watch(searchTokens, (value) => {
   if (searchTimer !== null) window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => {
-    searchDebounced.value = value.trim()
+    searchDebounced.value = value.join(' ')
   }, searchDebounceMs)
-})
+}, { deep: true })
 
 async function scan() {
   if (!folder.value) return
@@ -129,6 +146,11 @@ async function scan() {
   }
 }
 
+// Re-sync runs quietly in the background. The button lives here; the
+// state and result message are shared with the StatusBar via the
+// transport/resync module, so the user sees progress and outcome in
+// the footer instead of next to the button.
+
 async function cancelScan() {
   if (!scanning.value) return
   cancelling.value = true
@@ -143,12 +165,47 @@ async function cancelScan() {
 async function loadPhotos() {
   loading.value = true
   error.value = null
+
+  // Snapshot anchor paths so a refresh (scan finish, resync, etc.)
+  // doesn't warp the viewport. We key on path, not index, because
+  // deletions in the middle of the list would otherwise shift every
+  // later photo under the user's scroll position.
+  const anchorTopPath = visibleCells.value[0]?.photo.Path ?? null
+  const anchorFocusedPath = focused.value >= 0
+    ? photos.value[focused.value]?.Path ?? null
+    : null
+
   try {
     const q = new URLSearchParams({ sort: sortKey.value, order: sortOrder.value })
-    if (searchDebounced.value) q.set('q', searchDebounced.value)
+    if (searchDebounced.value) {
+      q.set('q', searchDebounced.value)
+      q.set('match', searchMode.value)
+    }
     if (selectedFolder.value) q.set('folder', selectedFolder.value)
-    photos.value = await apiGet<Photo[]>(`/api/photos?${q.toString()}`)
-    focused.value = photos.value.length ? 0 : -1
+    const next = await apiGet<Photo[]>(`/api/photos?${q.toString()}`)
+    photos.value = next
+
+    // Restore focus/scroll from the snapshot above. If the anchor
+    // photo was deleted the focus falls back to the nearest surviving
+    // index, matching users' expectation that "my place" persists.
+    if (anchorFocusedPath) {
+      const idx = next.findIndex((p) => p.Path === anchorFocusedPath)
+      focused.value = idx >= 0 ? idx : (next.length ? 0 : -1)
+    } else {
+      focused.value = next.length ? 0 : -1
+    }
+    if (anchorTopPath) {
+      const topIdx = next.findIndex((p) => p.Path === anchorTopPath)
+      if (topIdx >= 0) {
+        nextTick(() => {
+          const el = scroller.value
+          if (!el) return
+          const row = Math.floor(topIdx / columns.value)
+          el.scrollTop = row * cellSize.value
+          scrollTop.value = el.scrollTop
+        })
+      }
+    }
   } catch (err) {
     error.value = friendlyError(err)
     photos.value = []
@@ -225,6 +282,223 @@ function openAt(index: number) {
   if (index < 0 || index >= photos.value.length) return
   viewerIndex.value = index
   focused.value = index
+  selectOnly(photos.value[index].Path)
+}
+
+// onCellClick routes a cell click through the modifier-key handling
+// the feature spec calls for. Plain click opens the viewer on that
+// photo (and collapses the selection to it); Ctrl/Meta toggles; Shift
+// extends from the selection anchor. Any modifier click closes an
+// open viewer so the panel can switch to the multi-selection summary.
+function onCellClick(index: number, e: MouseEvent) {
+  if (index < 0 || index >= photos.value.length) return
+  const path = photos.value[index].Path
+  focused.value = index
+  if (e.shiftKey) {
+    e.preventDefault()
+    viewerIndex.value = -1
+    selectRange(path, photos.value.map((p) => p.Path))
+    return
+  }
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault()
+    viewerIndex.value = -1
+    toggleSelection(path)
+    return
+  }
+  openAt(index)
+}
+
+// multiSelection photos — the panel switches to SelectionSummary when
+// this has 2+ items. Order follows the grid's current sort so the
+// aggregate "n selected" count is stable across sort flips.
+const multiSelection = computed<Photo[]>(() => {
+  if (selectedPaths.value.size < 2) return []
+  const out: Photo[] = []
+  for (const p of photos.value) {
+    if (selectedPaths.value.has(p.Path)) out.push(p)
+  }
+  return out
+})
+
+function clearAllSelection() {
+  clearSelection()
+  viewerIndex.value = -1
+}
+
+// Marquee drag selection. We track coordinates in scroller content
+// space (i.e. including scrollTop) so selection rectangles extend
+// correctly when the drag crosses into an unscrolled region. Only
+// mousedown on the scroller's blank area starts a marquee — cells
+// own their click handling above.
+interface MarqueeRect { x1: number; y1: number; x2: number; y2: number }
+const marquee = ref<MarqueeRect | null>(null)
+let marqueeBase = new Set<string>()
+let marqueeAdditive = false
+
+// Auto-scroll state while a marquee drag is near the viewport edge.
+// We keep the latest mouse position in client coordinates and tick on
+// rAF; each tick nudges scrollTop and re-derives the content-space
+// marquee corner so the rectangle grows with the scroll.
+const autoScrollEdge = 48
+const autoScrollMax = 24
+let autoScrollRAF = 0
+let lastClientX = 0
+let lastClientY = 0
+
+const marqueeBox = computed(() => {
+  const m = marquee.value
+  if (!m) return null
+  return {
+    left: Math.min(m.x1, m.x2),
+    top: Math.min(m.y1, m.y2),
+    width: Math.abs(m.x2 - m.x1),
+    height: Math.abs(m.y2 - m.y1),
+  }
+})
+
+function onScrollerMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('.photo-grid__cell')) return
+  const el = scroller.value
+  if (!el) return
+  e.preventDefault()
+
+  marqueeAdditive = e.ctrlKey || e.metaKey || e.shiftKey
+  marqueeBase = marqueeAdditive ? new Set(selectedPaths.value) : new Set()
+  if (!marqueeAdditive) {
+    clearSelection()
+    viewerIndex.value = -1
+  }
+
+  const pt = pointInContent(e, el)
+  marquee.value = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y }
+  window.addEventListener('mousemove', onMarqueeMove)
+  window.addEventListener('mouseup', onMarqueeUp)
+}
+
+function onMarqueeMove(e: MouseEvent) {
+  const el = scroller.value
+  const m = marquee.value
+  if (!el || !m) return
+  lastClientX = e.clientX
+  lastClientY = e.clientY
+  const pt = pointInContent(e, el)
+  marquee.value = { ...m, x2: pt.x, y2: pt.y }
+  applyMarqueeSelection()
+  ensureAutoScroll()
+}
+
+function onMarqueeUp() {
+  marquee.value = null
+  if (autoScrollRAF !== 0) {
+    cancelAnimationFrame(autoScrollRAF)
+    autoScrollRAF = 0
+  }
+  // Nudge the anchor to the last photo we touched so a follow-up
+  // shift-click extends from here rather than the previous plain
+  // click — this matches what Finder does after a drag.
+  const top = [...selectedPaths.value].pop()
+  if (top) anchorPath.value = top
+  window.removeEventListener('mousemove', onMarqueeMove)
+  window.removeEventListener('mouseup', onMarqueeUp)
+}
+
+// ensureAutoScroll kicks the rAF loop if it isn't already running.
+// autoScrollTick keeps itself alive while the mouse is still near an
+// edge and the marquee is still active.
+function ensureAutoScroll() {
+  if (autoScrollRAF !== 0) return
+  autoScrollRAF = requestAnimationFrame(autoScrollTick)
+}
+
+function autoScrollTick() {
+  autoScrollRAF = 0
+  const el = scroller.value
+  const m = marquee.value
+  if (!el || !m) return
+  const rect = el.getBoundingClientRect()
+  const dy = edgeVelocity(lastClientY, rect.top, rect.bottom)
+  const dx = edgeVelocity(lastClientX, rect.left, rect.right)
+  if (dx === 0 && dy === 0) return
+
+  // Scroll and clamp so we don't keep scheduling work past the end of
+  // the list. Reading scrollTop back catches the browser's own clamp.
+  el.scrollTop = Math.max(0, el.scrollTop + dy)
+  el.scrollLeft = Math.max(0, el.scrollLeft + dx)
+  // Keep the marquee corner tracking the stationary cursor: as the
+  // content scrolls under it, the content-space coordinate shifts.
+  const pt = {
+    x: lastClientX - rect.left + el.scrollLeft,
+    y: lastClientY - rect.top + el.scrollTop,
+  }
+  marquee.value = { ...m, x2: pt.x, y2: pt.y }
+  applyMarqueeSelection()
+  autoScrollRAF = requestAnimationFrame(autoScrollTick)
+}
+
+// edgeVelocity returns a signed pixels-per-tick delta based on how
+// deep into the edge threshold the pointer has crept. Linear ramp
+// from 0 at the threshold to autoScrollMax at the viewport edge.
+function edgeVelocity(pos: number, min: number, max: number): number {
+  if (pos < min + autoScrollEdge) {
+    const depth = Math.min(autoScrollEdge, min + autoScrollEdge - pos)
+    return -Math.round((depth / autoScrollEdge) * autoScrollMax)
+  }
+  if (pos > max - autoScrollEdge) {
+    const depth = Math.min(autoScrollEdge, pos - (max - autoScrollEdge))
+    return Math.round((depth / autoScrollEdge) * autoScrollMax)
+  }
+  return 0
+}
+
+function pointInContent(e: MouseEvent, el: HTMLElement) {
+  const rect = el.getBoundingClientRect()
+  return {
+    x: e.clientX - rect.left + el.scrollLeft,
+    y: e.clientY - rect.top + el.scrollTop,
+  }
+}
+
+function applyMarqueeSelection() {
+  const m = marquee.value
+  if (!m) return
+  const pitch = cellSize.value
+  const cols = columns.value
+  const gutter = 12
+  const inner = pitch - gutter * 2
+
+  const xmin = Math.min(m.x1, m.x2)
+  const xmax = Math.max(m.x1, m.x2)
+  const ymin = Math.min(m.y1, m.y2)
+  const ymax = Math.max(m.y1, m.y2)
+
+  const next = new Set(marqueeBase)
+  // Instead of iterating every photo, compute the row/column span the
+  // rectangle overlaps and visit only those cells. O(cells in rect)
+  // even for million-photo libraries.
+  const firstRow = Math.max(0, Math.floor(ymin / pitch))
+  const lastRow = Math.min(Math.max(totalRows.value - 1, 0), Math.floor(ymax / pitch))
+  const firstCol = Math.max(0, Math.floor(xmin / pitch))
+  const lastCol = Math.min(cols - 1, Math.floor(xmax / pitch))
+  for (let r = firstRow; r <= lastRow; r++) {
+    for (let c = firstCol; c <= lastCol; c++) {
+      // Only select cells whose inner box actually intersects the
+      // rectangle — the rectangle can cross a cell's gutter without
+      // touching its image.
+      const cellLeft = c * pitch + gutter
+      const cellRight = cellLeft + inner
+      const cellTop = r * pitch + gutter
+      const cellBottom = cellTop + inner
+      if (cellRight < xmin || cellLeft > xmax) continue
+      if (cellBottom < ymin || cellTop > ymax) continue
+      const idx = r * cols + c
+      if (idx >= photos.value.length) continue
+      next.add(photos.value[idx].Path)
+    }
+  }
+  selectedPaths.value = next
 }
 
 function closeViewer() {
@@ -245,6 +519,12 @@ function closeViewer() {
 function onKeydown(e: KeyboardEvent) {
   if (!photos.value.length) return
   if (viewerIndex.value >= 0) return // viewer owns its keys
+  // Ignore keystrokes coming from form fields (TagInput in the
+  // summary panel, the search pill-input, any future input). Space
+  // and Enter in those contexts are for the editor; without this
+  // guard, pressing Space to commit a tag would also trigger
+  // openAt(focused) and collapse the selection.
+  if (isEditableTarget(e.target)) return
   const cols = columns.value
   let next = focused.value
   switch (e.key) {
@@ -263,6 +543,24 @@ function onKeydown(e: KeyboardEvent) {
   e.preventDefault()
   focused.value = next
   ensureVisible(next)
+
+  // Shift+arrow extends the selection from the anchor to the new
+  // focused photo, matching the standard Finder / File Explorer
+  // contract. A bare arrow leaves the current selection alone — it's
+  // only moving the keyboard cursor.
+  if (e.shiftKey && next >= 0 && next < photos.value.length) {
+    const path = photos.value[next].Path
+    if (anchorPath.value === null) anchorPath.value = path
+    selectRange(path, photos.value.map((p) => p.Path))
+    viewerIndex.value = -1
+  }
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
 function ensureVisible(index: number) {
@@ -341,7 +639,7 @@ onBeforeUnmount(() => {
 // loadPhotos runs on any server-shaping param change. Running it on
 // mount too restores the view after a restart — the library is
 // already persisted, so there's nothing to wait on.
-watch([sortKey, sortOrder, searchDebounced, selectedFolder], () => {
+watch([sortKey, sortOrder, searchDebounced, searchMode, selectedFolder], () => {
   loadPhotos()
 })
 
@@ -401,6 +699,15 @@ watch(cellSize, (_newSize, oldSize) => {
       >
         {{ cancelling ? 'Cancelling…' : 'Cancel scan' }}
       </button>
+      <button
+        class="photo-grid__btn photo-grid__btn--secondary"
+        type="button"
+        :disabled="resyncing || scanning"
+        title="Check disk for deleted photos and drop missing entries"
+        @click="runResync"
+      >
+        {{ resyncing ? 'Syncing…' : 'Re-sync' }}
+      </button>
       <select class="photo-grid__select" v-model="sortKey">
         <option value="name">Name</option>
         <option value="date">Date taken</option>
@@ -410,13 +717,26 @@ watch(cellSize, (_newSize, oldSize) => {
         <option value="asc">Asc</option>
         <option value="desc">Desc</option>
       </select>
-      <input
-        v-model="search"
+      <TagInput
+        v-model="searchTokens"
         class="photo-grid__search"
-        type="search"
-        placeholder="Search by name…"
-        aria-label="Search photos by name"
+        placeholder="Search name or tag…"
+        aria-label="Search photos by name or tag"
       />
+      <div class="photo-grid__match" role="group" aria-label="Match mode">
+        <button
+          type="button"
+          class="photo-grid__match-btn"
+          :class="{ 'photo-grid__match-btn--active': searchMode === 'all' }"
+          @click="searchMode = 'all'"
+        >All</button>
+        <button
+          type="button"
+          class="photo-grid__match-btn"
+          :class="{ 'photo-grid__match-btn--active': searchMode === 'any' }"
+          @click="searchMode = 'any'"
+        >Any</button>
+      </div>
     </header>
 
     <div class="photo-grid__content">
@@ -436,7 +756,7 @@ watch(cellSize, (_newSize, oldSize) => {
         class="photo-grid__empty"
       >
         {{ searchDebounced
-            ? `No photos match “${searchDebounced}”.`
+            ? `No photos match ${searchMode === 'all' ? 'all' : 'any'} of: ${searchTokens.join(', ')}.`
             : 'No photos yet — point Kestrel at a folder and scan.' }}
       </p>
 
@@ -446,6 +766,7 @@ watch(cellSize, (_newSize, oldSize) => {
         class="photo-grid__scroller"
         tabindex="0"
         @scroll.passive="onScroll"
+        @mousedown="onScrollerMouseDown"
       >
       <div
         class="photo-grid__spacer"
@@ -455,10 +776,13 @@ watch(cellSize, (_newSize, oldSize) => {
           v-for="cell in visibleCells"
           :key="cell.photo.Path"
           class="photo-grid__cell"
-          :class="{ 'photo-grid__cell--focused': cell.index === focused }"
+          :class="{
+            'photo-grid__cell--focused': cell.index === focused,
+            'photo-grid__cell--selected': selectedPaths.has(cell.photo.Path),
+          }"
           :style="{ transform: `translate(${cell.x}px, ${cell.y}px)` }"
           :data-index="cell.index"
-          @click="openAt(cell.index)"
+          @click="onCellClick(cell.index, $event)"
           @focus="focused = cell.index"
         >
           <img
@@ -469,11 +793,27 @@ watch(cellSize, (_newSize, oldSize) => {
             decoding="async"
           />
         </button>
+        <div
+          v-if="marqueeBox"
+          class="photo-grid__marquee"
+          :style="{
+            left: marqueeBox.left + 'px',
+            top: marqueeBox.top + 'px',
+            width: marqueeBox.width + 'px',
+            height: marqueeBox.height + 'px',
+          }"
+          aria-hidden="true"
+        />
       </div>
     </div>
 
+      <SelectionSummary
+        v-if="multiSelection.length >= 2"
+        :photos="multiSelection"
+        @clear="clearAllSelection"
+      />
       <PhotoViewer
-        v-if="viewerPhoto"
+        v-else-if="viewerPhoto"
         :photo="viewerPhoto"
         @close="closeViewer"
         @prev="openAt(viewerIndex - 1)"
@@ -553,8 +893,7 @@ watch(cellSize, (_newSize, oldSize) => {
   box-shadow: none;
   cursor: not-allowed;
 }
-.photo-grid__select,
-.photo-grid__search {
+.photo-grid__select {
   background: var(--surface-inset);
   color: var(--text-primary);
   border: var(--border-thin) solid var(--border-subtle);
@@ -562,9 +901,35 @@ watch(cellSize, (_newSize, oldSize) => {
   padding: var(--space-2) var(--space-4);
   font: inherit;
 }
-.photo-grid__search { min-width: 220px; }
-.photo-grid__search:focus,
 .photo-grid__select:focus { border-color: var(--accent); outline: none; }
+.photo-grid__search { flex: 1; min-width: 240px; }
+
+.photo-grid__match {
+  display: inline-flex;
+  background: var(--surface-inset);
+  border: var(--border-thin) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-inset);
+  padding: var(--space-1);
+  gap: var(--space-1);
+}
+.photo-grid__match-btn {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-4);
+  font: var(--fw-medium) var(--fs-body) / 1 var(--font-sans);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.photo-grid__match-btn:hover { color: var(--text-primary); }
+.photo-grid__match-btn--active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--elev-raised);
+}
 
 .photo-grid__error {
   color: var(--danger);
@@ -661,10 +1026,23 @@ watch(cellSize, (_newSize, oldSize) => {
 }
 .photo-grid__cell:hover { border-color: var(--border-subtle); }
 .photo-grid__cell--focused { border-color: var(--accent); }
+.photo-grid__cell--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 14px var(--accent-glow);
+}
 .photo-grid__thumb {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.photo-grid__marquee {
+  position: absolute;
+  pointer-events: none;
+  background: var(--accent-glow);
+  border: var(--border-thin) solid var(--accent);
+  border-radius: var(--radius-sm);
+  mix-blend-mode: screen;
 }
 </style>

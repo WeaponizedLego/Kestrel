@@ -41,6 +41,18 @@ const avgThumbnailBytes int64 = 20 * 1024
 // requests to drain before forcing the server closed.
 const shutdownGrace = 5 * time.Second
 
+// browserIdleGrace is how long the server waits with zero WebSocket
+// subscribers before treating "the user closed their browser" as a
+// shutdown request. A short network blip or a tab refresh disconnects
+// the socket; the frontend reconnects within ~1s (see events.ts
+// backoff), so 10s is comfortable for real closure versus noise.
+const browserIdleGrace = 10 * time.Second
+
+// browserIdlePoll is the watcher's tick rate. Cheap — it only reads
+// an atomic-ish counter on the Hub — so sub-second polling wouldn't
+// hurt, but 1s is plenty responsive for a process-exit condition.
+const browserIdlePoll = 1 * time.Second
+
 // devToken is the fixed session token used in --dev mode. It matches
 // the constant in frontend/vite.config.ts so `npm run dev` and
 // `go run ./cmd/kestrel --dev` agree on auth without either side
@@ -131,7 +143,7 @@ func run(devMode bool, bind string) error {
 		},
 	})
 
-	libraryHandler := api.NewLibraryHandler(lib, runner)
+	libraryHandler := api.NewLibraryHandler(lib, runner, hub)
 	thumbsHandler := api.NewThumbsHandler(provider)
 
 	var token string
@@ -181,13 +193,28 @@ func run(devMode bool, bind string) error {
 	defer stopAutoSave()
 	go autoSaveLoop(autoSaveCtx, lib, metaPath, autoSaveInterval)
 
+	shutdownCtx, triggerShutdown := context.WithCancel(context.Background())
+	defer triggerShutdown()
+
+	// Watch for the browser tab closing. We arm the watcher only after
+	// a client has connected at least once, so a slow browser launch
+	// (or a failed browser launch) doesn't instantly shut us down.
+	// Disabled under --dev because hot reloads and dev-server restarts
+	// would otherwise kill the backend repeatedly.
+	if !devMode {
+		go watchBrowserLifecycle(shutdownCtx, hub, browserIdleGrace, browserIdlePoll, func() {
+			slog.Info("no browser tabs connected; shutting down")
+			triggerShutdown()
+		})
+	}
+
 	if !devMode {
 		if err := platform.OpenBrowser(url); err != nil {
 			slog.Warn("could not launch browser", "url", url, "err", err)
 		}
 	}
 
-	waitForShutdown()
+	waitForShutdown(shutdownCtx)
 	slog.Info("shutdown requested")
 
 	stopAutoSave()
@@ -333,9 +360,62 @@ func autoSaveLoop(ctx context.Context, lib *library.Library, path string, interv
 	}
 }
 
-// waitForShutdown blocks until the process receives SIGINT or SIGTERM.
-func waitForShutdown() {
+// waitForShutdown blocks until the process receives SIGINT/SIGTERM or
+// the supplied context is cancelled (the browser-lifecycle watcher
+// triggers this when the user has closed every tab).
+func waitForShutdown(ctx context.Context) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	select {
+	case <-stop:
+	case <-ctx.Done():
+	}
+}
+
+// watchBrowserLifecycle calls onIdle when the hub has been empty for
+// grace after having been non-empty at least once. Returns when ctx
+// is cancelled. Designed for the "close the browser tab → kill the
+// server" UX: without this, the Go binary outlives its only client
+// and leaks into the user's process list.
+//
+// The "has been non-empty at least once" guard is important: the
+// first browser connection arrives a few hundred ms after startup,
+// and we don't want to shut down before the user's tab has ever
+// reached us.
+func watchBrowserLifecycle(
+	ctx context.Context,
+	hub *server.Hub,
+	grace time.Duration,
+	poll time.Duration,
+	onIdle func(),
+) {
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	armed := false
+	var idleSince time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if hub.SubscriberCount() > 0 {
+				armed = true
+				idleSince = time.Time{}
+				continue
+			}
+			if !armed {
+				continue
+			}
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+				continue
+			}
+			if time.Since(idleSince) >= grace {
+				onIdle()
+				return
+			}
+		}
+	}
 }

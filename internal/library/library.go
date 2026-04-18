@@ -4,12 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"path/filepath"
+	"strings"
 	"sync"
 )
 
 // ErrPhotoNotFound is returned by GetPhoto when the requested path is
 // absent from the library.
 var ErrPhotoNotFound = errors.New("photo not found")
+
+// HiddenTag is the magic tag that suppresses a photo from default
+// listings. Filtering by it lives in the API layer (see listPhotos);
+// the library treats it like any other tag. Kept here as the single
+// source of truth so tests and handlers can't drift on the spelling.
+const HiddenTag = "hidden"
 
 // SortKey selects which pre-built index Sorted reads from. Adding a
 // fourth key means adding a slice, a rebuild branch, and the handler
@@ -72,6 +80,162 @@ func (l *Library) GetPhoto(path string) (*Photo, error) {
 		return nil, fmt.Errorf("looking up %s: %w", path, ErrPhotoNotFound)
 	}
 	return p, nil
+}
+
+// PruneMissing removes every photo for which exists(path) returns
+// false. The predicate is called without any library locks held, so a
+// slow os.Stat doesn't block readers; only the final remove step
+// acquires the write lock.
+//
+// Returns the list of removed paths so callers can log / broadcast
+// specifics if they want.
+func (l *Library) PruneMissing(exists func(path string) bool) []string {
+	// Snapshot the paths under an RLock so we don't hold any lock
+	// while hitting the filesystem. Stat'ing 1M files under a write
+	// lock would freeze every reader for minutes.
+	l.mu.RLock()
+	paths := make([]string, 0, len(l.photos))
+	for p := range l.photos {
+		paths = append(paths, p)
+	}
+	l.mu.RUnlock()
+
+	missing := make([]string, 0)
+	for _, p := range paths {
+		if !exists(p) {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, p := range missing {
+		delete(l.photos, p)
+	}
+	l.dirty = true
+	return missing
+}
+
+// SetTags replaces the tag set on the photo at path. Input is
+// normalized (lowercased, trimmed, deduplicated) before storage, so
+// callers can pass whatever the user typed. Returns ErrPhotoNotFound
+// (wrapped) when path is unknown.
+func (l *Library) SetTags(path string, tags []string) error {
+	normalized := NormalizeTags(tags)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p, ok := l.photos[path]
+	if !ok {
+		return fmt.Errorf("setting tags on %s: %w", path, ErrPhotoNotFound)
+	}
+	p.Tags = normalized
+	return nil
+}
+
+// AddTagsToPaths merges tags into every photo in paths. Unknown paths
+// are silently skipped — the handler layer decides whether that's
+// worth reporting to the user. Returns the number of photos that
+// actually gained a new tag (existing-tag no-ops don't count).
+func (l *Library) AddTagsToPaths(paths []string, tags []string) int {
+	additions := NormalizeTags(tags)
+	if len(additions) == 0 || len(paths) == 0 {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	updated := 0
+	for _, path := range paths {
+		p, ok := l.photos[path]
+		if !ok {
+			continue
+		}
+		merged, changed := mergeTags(p.Tags, additions)
+		if changed {
+			p.Tags = merged
+			updated++
+		}
+	}
+	return updated
+}
+
+// AddTagsToFolder merges tags into every photo whose path lives under
+// folder (transitively — sub-folder photos are included). Existing
+// tags are preserved; only new ones are appended, so right-clicking a
+// folder to "tag all" feels additive rather than destructive.
+// Returns the number of photos actually modified.
+func (l *Library) AddTagsToFolder(folder string, tags []string) int {
+	additions := NormalizeTags(tags)
+	if len(additions) == 0 {
+		return 0
+	}
+	prefix := strings.TrimRight(folder, string(filepath.Separator)) + string(filepath.Separator)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	updated := 0
+	for _, p := range l.photos {
+		if !strings.HasPrefix(p.Path, prefix) {
+			continue
+		}
+		merged, changed := mergeTags(p.Tags, additions)
+		if changed {
+			p.Tags = merged
+			updated++
+		}
+	}
+	return updated
+}
+
+// mergeTags returns the union of existing and additions, preserving
+// existing order and appending only tags not already present. The
+// second return reports whether any new tag was added.
+func mergeTags(existing, additions []string) ([]string, bool) {
+	if len(additions) == 0 {
+		return existing, false
+	}
+	have := make(map[string]struct{}, len(existing))
+	for _, t := range existing {
+		have[t] = struct{}{}
+	}
+	out := existing
+	changed := false
+	for _, t := range additions {
+		if _, dup := have[t]; dup {
+			continue
+		}
+		have[t] = struct{}{}
+		out = append(out, t)
+		changed = true
+	}
+	return out, changed
+}
+
+// NormalizeTags returns a canonical form of raw: lowercased, trimmed,
+// with empties and duplicates removed, order-preserving. Exported so
+// handlers and tests can share the normalization contract.
+func NormalizeTags(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, t := range raw {
+		clean := strings.ToLower(strings.TrimSpace(t))
+		if clean == "" {
+			continue
+		}
+		if _, dup := seen[clean]; dup {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
 }
 
 // AllPhotos returns a snapshot copy of every photo currently stored

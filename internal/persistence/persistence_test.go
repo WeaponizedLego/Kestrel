@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		t.Fatalf("len(got) = %d, want %d", len(got), len(want))
 	}
 	for i := range want {
-		if *got[i] != *want[i] {
+		if !reflect.DeepEqual(*got[i], *want[i]) {
 			t.Errorf("photo %d: got %+v, want %+v", i, *got[i], *want[i])
 		}
 	}

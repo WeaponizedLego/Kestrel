@@ -18,4 +18,9 @@ export interface Photo {
   // EXIF attributes (zero values mean "absent")
   TakenAt: string
   CameraMake: string
+
+  // User-assigned tags. Always normalized (lowercase, deduplicated)
+  // on the server; null/undefined from older .gob files is treated as
+  // an empty array.
+  Tags: string[] | null
 }

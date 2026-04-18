@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue'
-import { photoSrc } from '../transport/api'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import type { Photo } from '../types'
+
+const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
 
 const props = defineProps<{ photo: Photo }>()
 const emit = defineEmits<{
@@ -56,6 +58,103 @@ function onKey(e: KeyboardEvent) {
 
 onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+
+const revealError = ref<string | null>(null)
+async function revealInFolder() {
+  revealError.value = null
+  try {
+    await apiPost<{ revealed: boolean }>('/api/reveal', { path: props.photo.Path })
+  } catch (err) {
+    revealError.value = friendlyError(err)
+  }
+}
+
+// Copy image as PNG to the clipboard. We fetch the full-res bytes,
+// decode them through a canvas, then hand a PNG blob to the Clipboard
+// API. Going via PNG is the pragmatic lowest-common-denominator for
+// paste targets — Discord, Slack, and most web editors accept it;
+// browsers can be picky about image/jpeg in ClipboardItem.
+const copyState = ref<'idle' | 'copying' | 'copied' | 'error'>('idle')
+const copyError = ref<string | null>(null)
+let copyResetTimer: number | null = null
+
+async function copyImage() {
+  if (copyState.value === 'copying') return
+  copyError.value = null
+  copyState.value = 'copying'
+  try {
+    const res = await fetch(src.value)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const sourceBlob = await res.blob()
+    const pngBlob = await encodePng(sourceBlob)
+    await navigator.clipboard.write([
+      new ClipboardItem({ 'image/png': pngBlob }),
+    ])
+    flashCopyState('copied')
+  } catch (err) {
+    copyError.value = friendlyError(err)
+    flashCopyState('error')
+  }
+}
+
+async function encodePng(source: Blob): Promise<Blob> {
+  // createImageBitmap handles decoding off the main thread where
+  // supported, and bypasses the DOM Image element's load race.
+  const bitmap = await createImageBitmap(source)
+  const canvas = document.createElement('canvas')
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('canvas 2d context unavailable')
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close?.()
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error('png encode failed'))),
+      'image/png',
+    )
+  })
+}
+
+function flashCopyState(next: 'copied' | 'error') {
+  copyState.value = next
+  if (copyResetTimer !== null) window.clearTimeout(copyResetTimer)
+  copyResetTimer = window.setTimeout(() => {
+    copyState.value = 'idle'
+    copyResetTimer = null
+  }, 1800)
+}
+
+// Tags editor. The local ref mirrors props.photo.Tags so TagInput can
+// v-model a mutable array; the watch resets it when the user flips
+// between photos. On change we POST the new set and sync back the
+// server's canonical form (lowercase, deduped) so e.g. mixed-case
+// input lines up with stored data after a save.
+const tagDraft = ref<string[]>(props.photo.Tags ?? [])
+const tagError = ref<string | null>(null)
+watch(
+  () => props.photo.Path,
+  () => { tagDraft.value = props.photo.Tags ?? [] },
+)
+
+async function commitTags(next: string[]) {
+  tagError.value = null
+  tagDraft.value = next
+  try {
+    const res = await apiPost<{ tags: string[] | null }>(
+      '/api/tags',
+      { path: props.photo.Path, tags: next },
+    )
+    const canonical = res.tags ?? []
+    tagDraft.value = canonical
+    // Mutate the prop's Tags in place so the grid's Photo view and
+    // future openings of the same photo reflect the save without a
+    // full /api/photos reload.
+    props.photo.Tags = canonical
+  } catch (err) {
+    tagError.value = friendlyError(err)
+  }
+}
 </script>
 
 <template>
@@ -69,10 +168,42 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <img :src="src" :alt="photo.Name" />
     </div>
 
+    <div class="panel__actions panel__actions--top">
+      <button
+        class="panel__action"
+        :class="{
+          'panel__action--ok': copyState === 'copied',
+          'panel__action--err': copyState === 'error',
+        }"
+        type="button"
+        :disabled="copyState === 'copying'"
+        @click="copyImage"
+      >
+        {{
+          copyState === 'copying' ? 'Copying…' :
+          copyState === 'copied'  ? 'Copied ✓' :
+          copyState === 'error'   ? 'Copy failed' :
+          'Copy image'
+        }}
+      </button>
+      <p v-if="copyError && copyState === 'error'" class="panel__muted panel__error" role="alert">{{ copyError }}</p>
+    </div>
+
     <nav class="panel__nav">
       <button class="panel__nav-btn" aria-label="Previous photo" @click="emit('prev')">‹ Prev</button>
       <button class="panel__nav-btn" aria-label="Next photo" @click="emit('next')">Next ›</button>
     </nav>
+
+    <div class="panel__actions">
+      <button
+        class="panel__action"
+        type="button"
+        @click="revealInFolder"
+      >
+        Show in folder
+      </button>
+      <p v-if="revealError" class="panel__muted panel__error" role="alert">{{ revealError }}</p>
+    </div>
 
     <dl class="panel__meta">
       <div class="panel__row">
@@ -103,7 +234,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
     <section class="panel__tags" aria-label="Tags">
       <h3>Tags</h3>
-      <p class="panel__muted">Tag editing coming soon.</p>
+      <TagInput
+        :model-value="tagDraft"
+        placeholder="Add tag…"
+        aria-label="Edit photo tags"
+        @update:model-value="commitTags"
+      />
+      <p v-if="tagError" class="panel__muted panel__error" role="alert">{{ tagError }}</p>
     </section>
   </aside>
 </template>
@@ -182,6 +319,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   font: inherit;
 }
 .panel__nav-btn:hover { border-color: var(--accent); background: var(--surface-inset); }
+
+.panel__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+.panel__action {
+  background: transparent;
+  color: var(--text-primary);
+  border: var(--border-thin) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+}
+.panel__action:hover:not(:disabled) { border-color: var(--accent); background: var(--surface-inset); }
+.panel__action:disabled { color: var(--text-muted); cursor: not-allowed; }
+.panel__action--ok { border-color: var(--success); color: var(--success); }
+.panel__action--err { border-color: var(--danger); color: var(--danger); }
+.panel__actions--top { padding-top: var(--space-3); }
+.panel__error { color: var(--danger); }
 
 .panel__meta {
   margin: 0;

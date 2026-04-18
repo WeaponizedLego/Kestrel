@@ -27,4 +27,9 @@ type Photo struct {
 	// EXIF attributes (zero values mean "absent")
 	TakenAt    time.Time
 	CameraMake string
+
+	// User-assigned tags, stored lowercase and deduplicated. The
+	// library is the only writer (see Library.SetTags), so readers can
+	// rely on the canonical form without re-normalizing.
+	Tags []string
 }

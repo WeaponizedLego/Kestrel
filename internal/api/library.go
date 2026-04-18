@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
+	"github.com/WeaponizedLego/kestrel/internal/platform"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
 )
 
@@ -19,15 +20,18 @@ import (
 // and return the folder tree. Scan lifecycle is delegated to a
 // scanner.Runner so a long scan doesn't hold an HTTP request hostage.
 type LibraryHandler struct {
-	lib    *library.Library
-	runner *scanner.Runner
+	lib       *library.Library
+	runner    *scanner.Runner
+	publisher scanner.Publisher
 }
 
-// NewLibraryHandler wires the handler to the shared library and scan
-// runner. The runner owns the Publisher / ThumbStore / Thumbnailer —
-// the handler just brokers HTTP calls to it.
-func NewLibraryHandler(lib *library.Library, runner *scanner.Runner) *LibraryHandler {
-	return &LibraryHandler{lib: lib, runner: runner}
+// NewLibraryHandler wires the handler to the shared library, scan
+// runner, and optional event publisher. The publisher is used to
+// broadcast "library:updated" when a mutation endpoint (e.g. bulk
+// tagging) changes what the UI sees; passing nil disables that
+// broadcast but leaves the mutation itself intact.
+func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, publisher scanner.Publisher) *LibraryHandler {
+	return &LibraryHandler{lib: lib, runner: runner, publisher: publisher}
 }
 
 // Register attaches every library route to mux. The server strips the
@@ -41,6 +45,209 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/scan/status", h.scanStatus)
 	mux.HandleFunc("/browse", h.browse)
 	mux.HandleFunc("/folders", h.folders)
+	mux.HandleFunc("/reveal", h.reveal)
+	mux.HandleFunc("/tags", h.setTags)
+	mux.HandleFunc("/folder-tags", h.addFolderTags)
+	mux.HandleFunc("/tags/bulk", h.addBulkTags)
+	mux.HandleFunc("/resync", h.resync)
+}
+
+// bulkTagsRequest is the JSON body accepted by POST /api/tags/bulk.
+// Tags are merged into every photo in Paths — additive semantics, the
+// same as folder-tags, because replacing tag sets across a
+// multi-selection is nearly always destructive.
+type bulkTagsRequest struct {
+	Paths []string `json:"paths"`
+	Tags  []string `json:"tags"`
+}
+
+// addBulkTags responds to POST /api/tags/bulk by merging the given
+// tag set into every photo whose path is listed. Unknown paths are
+// silently skipped (a file may have been pruned between the client
+// selecting it and this call arriving). Publishes library:updated
+// when anything actually changed.
+func (h *LibraryHandler) addBulkTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req bulkTagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, "paths is required")
+		return
+	}
+	if len(req.Tags) == 0 {
+		writeError(w, http.StatusBadRequest, "tags is required")
+		return
+	}
+
+	updated := h.lib.AddTagsToPaths(req.Paths, req.Tags)
+	if updated > 0 && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"bulk-tagged": updated,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"updated": updated})
+}
+
+// resync responds to POST /api/resync by dropping photos whose files
+// no longer exist on disk. Stat calls happen outside the library lock
+// (see Library.PruneMissing), so a sweep over 1M photos on a slow
+// drive is background-safe. Publishes library:updated when anything
+// actually changed so open grids refresh.
+//
+// Named "resync" in the API (vs. "prune") to match the user-facing
+// mental model: the backing store moved on, re-read it.
+func (h *LibraryHandler) resync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	removed := h.lib.PruneMissing(fileExists)
+	if len(removed) > 0 && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"pruned": len(removed),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"removed": len(removed)})
+}
+
+// fileExists reports whether path points to something the filesystem
+// can stat. "Exists" here means "not a definite ENOENT" — transient
+// permission errors leave the entry in place so a flaky mount doesn't
+// nuke the library. The contract that any non-ENOENT stat means
+// "keep" matches users' mental model of prune as "delete only files
+// I know are gone".
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	return !os.IsNotExist(err)
+}
+
+// folderTagsRequest is the JSON body accepted by POST /api/folder-tags.
+// Tags are merged into every photo under Folder (transitively).
+type folderTagsRequest struct {
+	Folder string   `json:"folder"`
+	Tags   []string `json:"tags"`
+}
+
+// addFolderTags responds to POST /api/folder-tags by merging the
+// given tag set into every photo under folder (prefix match, same
+// semantics as filterByFolder). Publishes "library:updated" on success
+// so open photo grids refresh automatically.
+func (h *LibraryHandler) addFolderTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req folderTagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Folder == "" {
+		writeError(w, http.StatusBadRequest, "folder is required")
+		return
+	}
+	if !filepath.IsAbs(req.Folder) {
+		writeError(w, http.StatusBadRequest, "folder must be absolute")
+		return
+	}
+	if len(req.Tags) == 0 {
+		writeError(w, http.StatusBadRequest, "tags is required")
+		return
+	}
+
+	updated := h.lib.AddTagsToFolder(req.Folder, req.Tags)
+	if updated > 0 && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"folder":  req.Folder,
+			"updated": updated,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"updated": updated})
+}
+
+// tagsRequest is the JSON body accepted by POST /api/tags. Tags is the
+// full replacement set for the photo — the server normalizes it.
+type tagsRequest struct {
+	Path string   `json:"path"`
+	Tags []string `json:"tags"`
+}
+
+// setTags responds to POST /api/tags. Replaces the tag set on the
+// referenced photo; input is normalized by the library. 404 when the
+// path isn't in the library (same gate as /api/photo).
+func (h *LibraryHandler) setTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req tagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if err := h.lib.SetTags(req.Path, req.Tags); err != nil {
+		if errors.Is(err, library.ErrPhotoNotFound) {
+			writeError(w, http.StatusNotFound, "photo not in library")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Return the canonical tag set so the frontend can sync to the
+	// normalized form (lowercase, deduped) without a second fetch.
+	p, err := h.lib.GetPhoto(req.Path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": p.Tags})
+}
+
+// revealRequest is the JSON body accepted by POST /api/reveal.
+type revealRequest struct {
+	Path string `json:"path"`
+}
+
+// reveal responds to POST /api/reveal by opening the OS file manager at
+// the given photo's location. The path must already be in the library
+// — same gate as /api/photo — so a caller can't ask the backend to
+// reveal an arbitrary file.
+func (h *LibraryHandler) reveal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req revealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if _, err := h.lib.GetPhoto(req.Path); err != nil {
+		writeError(w, http.StatusNotFound, "photo not in library")
+		return
+	}
+	if err := platform.RevealInFileManager(req.Path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revealed": true})
 }
 
 // browseEntry is one row in a browse listing. Files are omitted;
@@ -191,25 +398,120 @@ func (h *LibraryHandler) listPhotos(w http.ResponseWriter, r *http.Request) {
 	if folder := r.URL.Query().Get("folder"); folder != "" {
 		photos = filterByFolder(photos, folder)
 	}
-	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
-		photos = filterByName(photos, q)
+	tokens := tokenizeQuery(r.URL.Query().Get("q"))
+	// Hidden photos are suppressed from every listing unless the query
+	// opts in by mentioning the "hidden" tag. This is independent of
+	// the AND/ANY match mode so a user can always reach them with a
+	// single-token search for "hidden".
+	if !containsToken(tokens, library.HiddenTag) {
+		photos = excludeHidden(photos)
+	}
+	if len(tokens) > 0 {
+		matchAny := r.URL.Query().Get("match") == "any"
+		photos = filterByTokens(photos, tokens, matchAny)
 	}
 	writeJSON(w, http.StatusOK, photos)
 }
 
-// filterByName returns the subset of photos whose Name contains the
-// query (case-insensitive substring match). Kept in the handler layer
-// because it's trivial matching, not a pre-built index the library
-// owns. Order is preserved.
-func filterByName(photos []*library.Photo, q string) []*library.Photo {
-	needle := strings.ToLower(q)
+// excludeHidden returns a copy of photos with entries tagged "hidden"
+// removed. Cheap for the common case — most photos won't carry the
+// tag — and the allocation is amortised against the full list we'd
+// otherwise return.
+func excludeHidden(photos []*library.Photo) []*library.Photo {
 	out := make([]*library.Photo, 0, len(photos))
 	for _, p := range photos {
-		if strings.Contains(strings.ToLower(p.Name), needle) {
+		if photoHasTag(p, library.HiddenTag) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// containsToken reports whether tokens includes needle (case-sensitive
+// match against the already-lowercased tokens).
+func containsToken(tokens []string, needle string) bool {
+	for _, t := range tokens {
+		if t == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// photoHasTag reports whether p carries tag. Photo.Tags is stored
+// normalized, so a direct equality check is enough.
+func photoHasTag(p *library.Photo, tag string) bool {
+	for _, t := range p.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// filterByTokens whitelists photos whose tokens match. Each token
+// matches a photo when either (a) the photo has an exact tag equal to
+// the token, or (b) the token is a case-insensitive substring of the
+// photo's Name. matchAny=true means any one token is enough; false
+// means every token must match.
+func filterByTokens(photos []*library.Photo, tokens []string, matchAny bool) []*library.Photo {
+	if len(tokens) == 0 {
+		return photos
+	}
+	out := make([]*library.Photo, 0, len(photos))
+	for _, p := range photos {
+		name := strings.ToLower(p.Name)
+		tags := tagSet(p.Tags)
+		if matchesTokens(tokens, name, tags, matchAny) {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// tokenizeQuery splits q on whitespace and lowercases each token,
+// dropping empty fragments. Mirrors the normalization SetTags applies
+// so typed input lines up against stored tags.
+func tokenizeQuery(q string) []string {
+	fields := strings.Fields(strings.ToLower(q))
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// tagSet returns a lookup set of the photo's tags. Photo.Tags is
+// already normalized (lowercase, deduped) by the library, so no
+// further work is needed here.
+func tagSet(tags []string) map[string]struct{} {
+	if len(tags) == 0 {
+		return nil
+	}
+	s := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		s[t] = struct{}{}
+	}
+	return s
+}
+
+// matchesTokens reports whether tokens match against name + tags under
+// the selected mode. A token matches when the tag set contains it
+// exactly, or when it appears as a substring in the lowercased name.
+func matchesTokens(tokens []string, name string, tags map[string]struct{}, matchAny bool) bool {
+	for _, tok := range tokens {
+		_, isTag := tags[tok]
+		hit := isTag || strings.Contains(name, tok)
+		if matchAny && hit {
+			return true
+		}
+		if !matchAny && !hit {
+			return false
+		}
+	}
+	// Loop ended without an early return: under "all" every token
+	// matched, under "any" none did.
+	return !matchAny
 }
 
 // filterByFolder returns the subset of photos whose path lives under
