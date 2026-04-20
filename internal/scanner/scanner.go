@@ -31,6 +31,7 @@ import (
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
 	"github.com/WeaponizedLego/kestrel/internal/metadata"
+	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
 )
 
 // pathQueueSize bounds how many discovered paths can sit in the channel
@@ -58,10 +59,12 @@ type ThumbStore interface {
 	Put(hash [32]byte, data []byte) error
 }
 
-// Thumbnailer renders a single image file into JPEG bytes. Declared
-// locally (instead of depending on thumbnail.Generate) so this
-// package stays a leaf.
-type Thumbnailer func(path string) ([]byte, error)
+// Thumbnailer renders a single image file into JPEG bytes plus a
+// 64-bit perceptual hash. Declared locally (instead of depending on
+// thumbnail.GenerateWithHash) so this package stays a leaf. The hash
+// feeds cluster.Manager; a zero value means "not computed" and is
+// treated as absent by consumers.
+type Thumbnailer func(path string) ([]byte, uint64, error)
 
 // Library is the slice of *library.Library Scan writes into. Declared
 // as an interface so tests can stub it with a recording fake.
@@ -82,6 +85,11 @@ type Options struct {
 	Publisher   Publisher
 	ThumbStore  ThumbStore
 	Thumbnailer Thumbnailer
+
+	// Autotag is passed to internal/metadata/autotag.Derive on every
+	// fresh photo. The zero value is safe: it produces a minimal set
+	// (kind, year, camera, …) without folder tags or geocoding.
+	Autotag autotag.Options
 }
 
 // Progress is the payload of a "scan:progress" event. Total is -1
@@ -220,14 +228,16 @@ func processPaths(
 				continue
 			}
 
-			photo, err := buildPhoto(path)
+			photo, err := buildPhoto(path, opts.Autotag)
 			if err != nil {
 				slog.Warn("scanner skipping file", "path", path, "err", err)
 				continue
 			}
 			if err := storeThumbnail(photo, opts); err != nil {
 				// Thumb generation is best-effort — a broken thumbnail
-				// must not lose the photo from the library.
+				// must not lose the photo from the library. pHash stays
+				// zero, cluster.Manager will skip the photo until the
+				// next successful rebuild.
 				slog.Warn("thumbnail generation failed", "path", path, "err", err)
 			}
 			lib.AddPhoto(photo)
@@ -274,14 +284,19 @@ func publishProgress(opts Options, n int64, root string) {
 // configured with both a Thumbnailer and a ThumbStore. With either
 // one missing it is a no-op — Phase 6 keeps thumb generation optional
 // so tests and future code paths can skip it.
+//
+// The perceptual hash returned by the thumbnailer is written straight
+// onto the photo so a later cluster rebuild can use it. Decode runs
+// once per file; doing the hash in the same pass is essentially free.
 func storeThumbnail(photo *library.Photo, opts Options) error {
 	if opts.Thumbnailer == nil || opts.ThumbStore == nil {
 		return nil
 	}
-	data, err := opts.Thumbnailer(photo.Path)
+	data, phash, err := opts.Thumbnailer(photo.Path)
 	if err != nil {
 		return fmt.Errorf("rendering: %w", err)
 	}
+	photo.PHash = phash
 	hashBytes, err := hex.DecodeString(photo.Hash)
 	if err != nil || len(hashBytes) != 32 {
 		return fmt.Errorf("decoding hash %q: %w", photo.Hash, err)
@@ -294,10 +309,13 @@ func storeThumbnail(photo *library.Photo, opts Options) error {
 	return nil
 }
 
-// buildPhoto stats path, hashes the file contents, and pulls the EXIF
-// snapshot. Any of those steps failing produces an error wrapped with
-// the path; the worker logs and skips so the scan as a whole completes.
-func buildPhoto(path string) (*library.Photo, error) {
+// buildPhoto stats path, hashes the file contents, pulls the EXIF
+// snapshot, and derives the photo's auto-tag set. Any of the first
+// three steps failing produces an error wrapped with the path; the
+// worker logs and skips so the scan as a whole completes. Auto-tag
+// derivation is always best-effort — an empty tag slice is a valid
+// output.
+func buildPhoto(path string, autotagOpts autotag.Options) (*library.Photo, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat for %s: %w", path, err)
@@ -320,6 +338,7 @@ func buildPhoto(path string) (*library.Photo, error) {
 		Height:     meta.Height,
 		TakenAt:    meta.TakenAt,
 		CameraMake: meta.CameraMake,
+		AutoTags:   autotag.Derive(path, meta, autotagOpts),
 	}, nil
 }
 

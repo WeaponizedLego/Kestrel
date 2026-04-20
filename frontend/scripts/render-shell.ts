@@ -25,6 +25,8 @@ const islandEntries = [
   '/src/islands/Toolbar.entry.ts',
   '/src/islands/PhotoGrid.entry.ts',
   '/src/islands/StatusBar.entry.ts',
+  '/src/islands/TaggingQueue.entry.ts',
+  '/src/islands/Duplicates.entry.ts',
 ]
 
 async function main() {
@@ -43,6 +45,7 @@ async function main() {
     <title>Kestrel</title>
     <!--KESTREL_TOKEN_META-->
     <link rel="stylesheet" href="/src/shell/tokens.css" />
+    <link rel="stylesheet" href="/src/shell/base.css" />
     <style>${shellStyles}</style>
   </head>
   <body>

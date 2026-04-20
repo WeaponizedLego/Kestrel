@@ -205,6 +205,11 @@ type Photo struct {
     Height     int
     TakenAt    time.Time
     CameraMake string
+
+    // Tagging
+    Tags     []string // user-applied tags
+    AutoTags []string // derived at scan time (camera, place, year, …) — regenerable, never mixed with Tags
+    PHash    uint64   // 64-bit perceptual hash for near-duplicate / similar clustering
 }
 
 // Note: Thumbnail bytes are NOT stored on the Photo struct.

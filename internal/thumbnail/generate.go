@@ -38,25 +38,92 @@ const JPEGQuality = 82
 // encoded JPEG bytes. Returns an error for unreadable files or image
 // formats the decoders don't recognise — callers treat those as
 // best-effort skips (see scanner).
+//
+// Kept for callers that only need the bytes; GenerateWithHash is the
+// richer entry point used by the scanner to also capture a perceptual
+// hash off the same decoded image.
 func Generate(path string) ([]byte, error) {
+	data, _, err := GenerateWithHash(path)
+	return data, err
+}
+
+// GenerateWithHash does the same work as Generate and, in the same
+// pass over the decoded image, computes a 64-bit difference-hash
+// (dHash) suitable for near-duplicate / visually-similar clustering
+// (see internal/library/cluster). Returning both values from one call
+// avoids decoding the image twice during a scan.
+//
+// A zero hash means "not computed" (e.g. extremely small input); the
+// caller treats it as absent, the same as a freshly-loaded v1 Photo.
+func GenerateWithHash(path string) ([]byte, uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
+		return nil, 0, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
 	src, _, err := image.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("decoding %s: %w", path, err)
+		return nil, 0, fmt.Errorf("decoding %s: %w", path, err)
 	}
 
 	dst := scaleToFit(src, ThumbSize)
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: JPEGQuality}); err != nil {
-		return nil, fmt.Errorf("encoding thumbnail for %s: %w", path, err)
+		return nil, 0, fmt.Errorf("encoding thumbnail for %s: %w", path, err)
 	}
-	return buf.Bytes(), nil
+
+	hash := perceptualHash(src)
+	return buf.Bytes(), hash, nil
+}
+
+// dHashWidth and dHashHeight are the resample dimensions for the
+// difference-hash. 9×8 gives 8 horizontal differences per row × 8
+// rows = 64 bits. Well-understood in the image-hashing literature —
+// see Neal Krawetz, "Kind of Like That", 2013.
+const (
+	dHashWidth  = 9
+	dHashHeight = 8
+)
+
+// perceptualHash computes a 64-bit dHash of src. The algorithm:
+//
+//  1. Downscale to dHashWidth × dHashHeight with bilinear filtering.
+//  2. Convert to grayscale luminance.
+//  3. For each of 8 rows, compare adjacent horizontal pixels: bit=1
+//     if left < right, else 0. That yields 8×8 = 64 bits of
+//     "brightness is increasing here" signal.
+//
+// dHash (vs. aHash or pHash-via-DCT) is used because it's robust to
+// global brightness shifts, survives JPEG re-encoding cleanly, and
+// needs no FFT/DCT machinery — a useful property for a pure-Go,
+// CGO-free build.
+func perceptualHash(src image.Image) uint64 {
+	small := image.NewRGBA(image.Rect(0, 0, dHashWidth, dHashHeight))
+	draw.BiLinear.Scale(small, small.Bounds(), src, src.Bounds(), draw.Over, nil)
+
+	var lumen [dHashHeight][dHashWidth]uint32
+	for y := 0; y < dHashHeight; y++ {
+		for x := 0; x < dHashWidth; x++ {
+			r, g, b, _ := small.At(x, y).RGBA()
+			// Rec. 601 luma weights; the 0..0xFFFF → 0..255 shift keeps
+			// the comparison in a tight range without allocating floats.
+			lumen[y][x] = (299*(r>>8) + 587*(g>>8) + 114*(b>>8)) / 1000
+		}
+	}
+
+	var hash uint64
+	var bit uint = 63
+	for y := 0; y < dHashHeight; y++ {
+		for x := 0; x < dHashWidth-1; x++ {
+			if lumen[y][x] < lumen[y][x+1] {
+				hash |= 1 << bit
+			}
+			bit--
+		}
+	}
+	return hash
 }
 
 // scaleToFit returns src resampled so neither dimension exceeds

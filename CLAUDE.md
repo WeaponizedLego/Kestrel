@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repo status
 
-**This repo is docs-only.** There is no Go code, no `go.mod`, no `frontend/`, no `package.json` yet — only design documents in `README.md`, `docs/`, and CI workflows in `.github/`. When implementation starts, follow the architecture and package layout described in `docs/system-design.md`; do not invent a different structure.
+**Kestrel is an active implementation.** The Go backend and Vue frontend both exist and build into a single binary; the design docs in `README.md` and `docs/` are the authoritative description of intent, not a backlog. When adding features, match the architecture and package layout already in `internal/` and `frontend/src/`. If a doc and the code disagree, update whichever is stale in the same change — don't invent a third structure.
 
 ## Architecture in one paragraph
 
@@ -12,25 +12,28 @@ Kestrel is a desktop photo manager for very large libraries (20K–1M+ images), 
 
 The UI shell is **not** a webview framework. The Go binary starts a `net/http` server bound to `127.0.0.1:0`, embeds the built Vue frontend via `//go:embed frontend/dist/*`, generates a per-run auth token, and opens the user's default browser at the loopback URL. Frontend talks to backend over REST (commands) + a single WebSocket endpoint (server-pushed events like `scan:progress`, `thumbnail:ready`). The Vue app uses **manual island hydration** — a build-time-rendered static shell with one Vue app mounted per interactive region, not one root hydrating everything.
 
-## Planned package layout (when coding starts)
+## Package layout
 
-- `cmd/kestrel/main.go` — wire internal packages, start server, launch browser
-- `internal/library/` — in-memory photo store (`map` + `RWMutex`), pre-sorted indices
-- `internal/scanner/` — directory walk + fixed worker pool (`runtime.NumCPU()`)
-- `internal/thumbnail/` — `ThumbnailProvider` interface, LRU, `thumbs.pack`, pre-fetcher
-- `internal/metadata/` — EXIF/file metadata extraction
-- `internal/persistence/` — `.gob` serialization (metadata only)
+- `cmd/kestrel/main.go` — wires internal packages, starts server, launches browser
+- `internal/library/` — in-memory photo store (`map` + `RWMutex`), pre-sorted indices, Photo struct (Tags + AutoTags + PHash)
+- `internal/library/cluster/` — perceptual-hash index + union-find clustering for assisted tagging
+- `internal/scanner/` — directory walk + fixed worker pool (`runtime.NumCPU()`) + `Runner` lifecycle
+- `internal/thumbnail/` — `ThumbnailProvider` interface, LRU, `thumbs.pack`, pre-fetcher, `GenerateWithHash`
+- `internal/metadata/` — EXIF/file metadata extraction (camera, lens, ISO, orientation, GPS)
+- `internal/metadata/autotag/` — derives auto-tags (camera, year, place, kind, …) from metadata + filesystem
+- `internal/metadata/autotag/geoindex/` — offline GPS→place lookup (stub; GeoNames dataset to be embedded)
+- `internal/persistence/` — `.gob` serialization (metadata only); schema v2 with forward-compat v1 load
 - `internal/server/` — `net/http` router, middleware, WebSocket hub
-- `internal/api/` — HTTP handlers (thin: decode → call domain → encode)
+- `internal/api/` — HTTP handlers (thin: decode → call domain → encode); `LibraryHandler`, `ThumbsHandler`, `TaggingHandler`
 - `internal/assets/` — `//go:embed` glue for the built frontend
 - `internal/platform/` — OS-specific helpers (browser launch, paths, memory detection)
-- `frontend/src/islands/` — one Vite entry per interactive region
-- `frontend/src/transport/` — shared `fetch` client + WebSocket singleton
+- `frontend/src/islands/` — one Vite entry per interactive region (Sidebar, Toolbar, PhotoGrid, StatusBar, TaggingQueue)
+- `frontend/src/transport/` — shared `fetch` client + WebSocket singleton + small topic-specific helpers
 - `frontend/src/shell/` + `frontend/scripts/` — build-time shell renderer using `@vue/server-renderer`
 
 `internal/api/` and `internal/server/` are separated on purpose: handlers don't import the server, they register against its router.
 
-## Common commands (per design docs — no build system exists yet)
+## Common commands
 
 ```bash
 # Dev: two processes, Vite proxies /api and /ws to Go
@@ -62,11 +65,12 @@ Write for the next human to read the file, not for the compiler. Every change sh
 - **Concurrency.** Never expose the photo map directly. All access goes through `Library` methods that acquire `sync.RWMutex` (`Lock` for writes, `RLock` for reads). Snapshots return copies so the lock is released before the frontend receives data.
 - **Worker pools sized to `runtime.NumCPU()`.** Never one goroutine per file.
 - **Loopback only.** The HTTP server binds `127.0.0.1` (never `0.0.0.0`). Bind port `:0` and read back the actual port. Gate every `/api/*` and `/ws` request on the per-run auth token, and reject WS upgrades with a non-matching `Origin`.
-- **Transport split.** All commands go through REST. The WebSocket is **one-way** (server → client) for events only: `scan:progress`, `thumbnail:ready`, `library:updated`.
+- **Transport split.** All commands go through REST. The WebSocket is **one-way** (server → client) for events only: `scan:progress`, `scan:started`, `scan:done`, `thumbnail:ready`, `library:updated`, `clusters:ready`.
 - **Event hub indirection.** Scanner/pre-fetcher/persistence never write to WS connections. They publish typed `Event{Kind, Payload}` to the hub, which fans out to subscribers.
 - **No JS-side sorting or filtering** over the photo list. Always call a REST endpoint that returns pre-sorted/filtered data from Go.
 - **Error wrapping.** Never `return err` bare. Always `fmt.Errorf("<doing what> for <which thing>: %w", err)`. Lowercase, no trailing punctuation.
 - **No `utils`/`helpers` packages.** One package = one responsibility.
+- **Frontend design skill.** Before any frontend/UI change (Vue components, islands, styles, layout, visuals), read and apply `.claude/skills/frontend-design/SKILL.md`. Its aesthetic direction must be honored alongside `docs/ui-design.md` and `docs/visual-design.md`.
 
 ## Go readability standards (from `docs/go-readability.md`)
 
@@ -93,4 +97,5 @@ PRs only; direct pushes to `develop` and `main` are blocked. Both checks are req
 - `docs/ui-design.md` — Vue 3 + Vite island hydration, REST/WS transport, component hierarchy, thumbnail strategy, frontend performance rules
 - `docs/visual-design.md` — dark neo-skeuomorphic tactile visual system: design tokens, elevation recipe, per-component specs
 - `docs/go-readability.md` — Go style, naming, comments, error handling, interfaces, tests, file organization
+- `docs/assisted-tagging.md` — EXIF auto-tags, pHash clustering, Tagging Queue UX for fresh libraries
 - `.github/copilot-instructions.md` — the same "video game architecture" and transport rules, condensed for Copilot

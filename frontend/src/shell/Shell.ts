@@ -14,6 +14,11 @@ export const Shell = defineComponent({
       h('header',  { class: 'shell__toolbar', 'data-island': 'toolbar' }),
       h('main',    { class: 'shell__grid',    'data-island': 'photo-grid' }),
       h('footer',  { class: 'shell__status',  'data-island': 'status-bar' }),
+      // TaggingQueue and Duplicates mount full-viewport overlays when
+      // opened from the Toolbar. The static shell just reserves their
+      // mount nodes; nothing is visible until the user triggers them.
+      h('div',     { 'data-island': 'tagging-queue' }),
+      h('div',     { 'data-island': 'duplicates' }),
     ])
   },
 })
@@ -21,17 +26,46 @@ export const Shell = defineComponent({
 export const shellStyles = `
   .shell {
     display: grid;
-    grid-template-columns: 240px 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: 40px 1fr 28px;
     grid-template-areas:
       "sidebar toolbar"
       "sidebar grid"
-      "sidebar status";
+      "status  status";
     height: 100vh;
-    background: var(--bg);
+    background: var(--surface-bg);
+    color: var(--text-primary);
   }
-  .shell__sidebar { grid-area: sidebar; background: var(--surface-inset); box-shadow: var(--elev-inset); }
-  .shell__toolbar { grid-area: toolbar; background: var(--surface-raised); box-shadow: var(--elev-raised); padding: var(--space-4) var(--space-5); }
-  .shell__grid    { grid-area: grid; padding: var(--space-5); overflow: hidden; min-height: 0; }
-  .shell__status  { grid-area: status; background: var(--surface-inset); box-shadow: var(--elev-inset); padding: var(--space-3) var(--space-5); color: var(--text-secondary); font-size: var(--fs-body); }
+  .shell__sidebar {
+    grid-area: sidebar;
+    background: var(--surface-bg);
+    border-right: 1px solid var(--border-subtle);
+    overflow: hidden;
+    min-height: 0;
+  }
+  .shell__toolbar {
+    grid-area: toolbar;
+    background: var(--surface-bg);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0 var(--space-5);
+    display: flex;
+    align-items: center;
+  }
+  .shell__grid {
+    grid-area: grid;
+    padding: var(--space-5);
+    overflow: hidden;
+    min-height: 0;
+    min-width: 0;
+  }
+  .shell__status {
+    grid-area: status;
+    background: var(--surface-bg);
+    border-top: 1px solid var(--border-subtle);
+    padding: 0 var(--space-5);
+    color: var(--text-secondary);
+    font-size: var(--fs-small);
+    display: flex;
+    align-items: center;
+  }
 `

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+
+	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
 )
 
 // ErrScanInProgress is returned by Runner.Start when another scan is
@@ -47,9 +49,17 @@ type RunnerConfig struct {
 	Publisher   Publisher
 	ThumbStore  ThumbStore
 	Thumbnailer Thumbnailer
+
+	// Autotag is passed through to each Scan as Options.Autotag.
+	// A zero value is safe: scanner-level autotag.Derive then emits
+	// the cheap subset (kind, year, camera, …).
+	Autotag autotag.Options
+
 	// OnFinish runs after every scan, successful or cancelled. Used
 	// by main.go to flush library_meta.gob — so a cancelled scan's
-	// work survives a crash even before the auto-save ticker fires.
+	// work survives a crash even before the auto-save ticker fires —
+	// and to invalidate the cluster cache so the next Tagging Queue
+	// query reflects freshly-hashed photos.
 	OnFinish func(added int, cancelled bool)
 }
 
@@ -62,6 +72,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 			Publisher:   cfg.Publisher,
 			ThumbStore:  cfg.ThumbStore,
 			Thumbnailer: cfg.Thumbnailer,
+			Autotag:     cfg.Autotag,
 		},
 		onFinish: cfg.OnFinish,
 	}

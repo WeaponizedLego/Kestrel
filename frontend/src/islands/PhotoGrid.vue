@@ -214,6 +214,11 @@ async function loadPhotos() {
   }
 }
 
+// pendingScrollToIndex overrides the default top-visible anchoring
+// during the next metrics tick. openAt sets it when the viewer first
+// mounts so the clicked photo is brought into view after the reflow.
+let pendingScrollToIndex: number | null = null
+
 function updateMetrics() {
   const el = scroller.value
   if (!el) return
@@ -221,11 +226,19 @@ function updateMetrics() {
   const oldWidth = viewportWidth.value
   const pitch = cellSize.value
 
-  // When width changes (viewer opens/closes, window resize, slider),
-  // anchor on the first on-screen photo so the rebuilt grid keeps the
-  // user's place instead of snapping to a different row offset.
+  // Scroll-to-index takes priority over top-visible anchoring: when
+  // the viewer opens, the photo the user clicked must stay on screen
+  // even if it wasn't the top-left cell before.
   let anchorIndex = -1
-  if (oldWidth > 0 && newWidth !== oldWidth) {
+  let scrollMode: 'pin-top' | 'ensure-visible' = 'pin-top'
+  if (pendingScrollToIndex !== null) {
+    anchorIndex = pendingScrollToIndex
+    scrollMode = 'ensure-visible'
+    pendingScrollToIndex = null
+  } else if (oldWidth > 0 && newWidth !== oldWidth) {
+    // Width changed without an explicit target (window resize, slider
+    // drag, closing the viewer) — anchor on the first on-screen photo
+    // so the rebuilt grid keeps the user's place.
     const oldCols = Math.max(1, Math.floor(oldWidth / pitch))
     const topRow = Math.floor(el.scrollTop / pitch)
     anchorIndex = topRow * oldCols
@@ -236,12 +249,21 @@ function updateMetrics() {
   scrollTop.value = el.scrollTop
 
   if (anchorIndex >= 0) {
+    const targetIndex = anchorIndex
     nextTick(() => {
       const scr = scroller.value
       if (!scr) return
       const newCols = Math.max(1, Math.floor(scr.clientWidth / cellSize.value))
-      const newRow = Math.floor(anchorIndex / newCols)
-      scr.scrollTop = newRow * cellSize.value
+      const newRow = Math.floor(targetIndex / newCols)
+      const rowTop = newRow * cellSize.value
+      if (scrollMode === 'ensure-visible') {
+        const rowBottom = rowTop + cellSize.value
+        if (rowTop < scr.scrollTop) scr.scrollTop = rowTop
+        else if (rowBottom > scr.scrollTop + scr.clientHeight)
+          scr.scrollTop = rowBottom - scr.clientHeight
+      } else {
+        scr.scrollTop = rowTop
+      }
       scrollTop.value = scr.scrollTop
     })
   }
@@ -280,6 +302,13 @@ function imgSrc(path: string): string {
 
 function openAt(index: number) {
   if (index < 0 || index >= photos.value.length) return
+  const viewerWasClosed = viewerIndex.value < 0
+  // When the viewer panel first mounts, the scroller shrinks and the
+  // column count drops. updateMetrics' default behavior is to pin the
+  // top-visible photo, which can push the photo the user just clicked
+  // below the fold. Flag the next metrics tick to anchor on the opened
+  // photo instead.
+  if (viewerWasClosed) pendingScrollToIndex = index
   viewerIndex.value = index
   focused.value = index
   selectOnly(photos.value[index].Path)
@@ -466,7 +495,7 @@ function applyMarqueeSelection() {
   if (!m) return
   const pitch = cellSize.value
   const cols = columns.value
-  const gutter = 12
+  const gutter = 3
   const inner = pitch - gutter * 2
 
   const xmin = Math.min(m.x1, m.x2)
@@ -666,76 +695,98 @@ watch(cellSize, (_newSize, oldSize) => {
 <template>
   <section class="photo-grid">
     <header class="photo-grid__bar">
-      <input
-        v-model="folder"
-        class="photo-grid__field"
-        type="text"
-        placeholder="/absolute/path/to/photos"
-        @keydown.enter="scan"
-      />
-      <button
-        class="photo-grid__btn photo-grid__btn--secondary"
-        type="button"
-        :disabled="scanning"
-        @click="openPicker"
-      >
-        Browse…
-      </button>
-      <button
-        v-if="!scanning"
-        class="photo-grid__btn"
-        type="button"
-        :disabled="!folder"
-        @click="scan"
-      >
-        Scan
-      </button>
-      <button
-        v-else
-        class="photo-grid__btn photo-grid__btn--danger"
-        type="button"
-        :disabled="cancelling"
-        @click="cancelScan"
-      >
-        {{ cancelling ? 'Cancelling…' : 'Cancel scan' }}
-      </button>
-      <button
-        class="photo-grid__btn photo-grid__btn--secondary"
-        type="button"
-        :disabled="resyncing || scanning"
-        title="Check disk for deleted photos and drop missing entries"
-        @click="runResync"
-      >
-        {{ resyncing ? 'Syncing…' : 'Re-sync' }}
-      </button>
-      <select class="photo-grid__select" v-model="sortKey">
-        <option value="name">Name</option>
-        <option value="date">Date taken</option>
-        <option value="size">Size</option>
-      </select>
-      <select class="photo-grid__select" v-model="sortOrder">
-        <option value="asc">Asc</option>
-        <option value="desc">Desc</option>
-      </select>
-      <TagInput
-        v-model="searchTokens"
-        class="photo-grid__search"
-        placeholder="Search name or tag…"
-        aria-label="Search photos by name or tag"
-      />
-      <div class="photo-grid__match" role="group" aria-label="Match mode">
+      <div class="photo-grid__row photo-grid__row--primary">
+        <div class="photo-grid__field-wrap">
+          <svg class="photo-grid__field-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M1.5 3C1.5 2.4 1.9 2 2.5 2H4.5L5.5 3H9.5C10.1 3 10.5 3.4 10.5 4V9C10.5 9.6 10.1 10 9.5 10H2.5C1.9 10 1.5 9.6 1.5 9V3Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
+          </svg>
+          <input
+            v-model="folder"
+            class="photo-grid__field"
+            type="text"
+            placeholder="/absolute/path/to/photos"
+            @keydown.enter="scan"
+          />
+        </div>
+        <button
+          class="photo-grid__btn photo-grid__btn--ghost"
+          type="button"
+          :disabled="scanning"
+          @click="openPicker"
+        >
+          Browse
+        </button>
+        <button
+          v-if="!scanning"
+          class="photo-grid__btn photo-grid__btn--primary"
+          type="button"
+          :disabled="!folder"
+          @click="scan"
+        >
+          Scan
+        </button>
+        <button
+          v-else
+          class="photo-grid__btn photo-grid__btn--danger"
+          type="button"
+          :disabled="cancelling"
+          @click="cancelScan"
+        >
+          {{ cancelling ? 'Cancelling…' : 'Cancel' }}
+        </button>
+        <button
+          class="photo-grid__btn photo-grid__btn--ghost"
+          type="button"
+          :disabled="resyncing || scanning"
+          title="Check disk for deleted photos and drop missing entries"
+          @click="runResync"
+        >
+          {{ resyncing ? 'Syncing…' : 'Re-sync' }}
+        </button>
+      </div>
+
+      <div class="photo-grid__row photo-grid__row--filters">
+        <TagInput
+          v-model="searchTokens"
+          class="photo-grid__search"
+          placeholder="Search name or tag…"
+          aria-label="Search photos by name or tag"
+        />
+        <div class="photo-grid__segmented" role="group" aria-label="Match mode">
+          <button
+            type="button"
+            class="photo-grid__seg-btn"
+            :class="{ 'photo-grid__seg-btn--active': searchMode === 'all' }"
+            @click="searchMode = 'all'"
+          >All</button>
+          <button
+            type="button"
+            class="photo-grid__seg-btn"
+            :class="{ 'photo-grid__seg-btn--active': searchMode === 'any' }"
+            @click="searchMode = 'any'"
+          >Any</button>
+        </div>
+        <div class="photo-grid__select-wrap">
+          <select class="photo-grid__select" v-model="sortKey" aria-label="Sort by">
+            <option value="name">Name</option>
+            <option value="date">Date taken</option>
+            <option value="size">Size</option>
+          </select>
+          <svg class="photo-grid__select-chev" width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+            <path d="M1.5 3L4 5.5L6.5 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
         <button
           type="button"
-          class="photo-grid__match-btn"
-          :class="{ 'photo-grid__match-btn--active': searchMode === 'all' }"
-          @click="searchMode = 'all'"
-        >All</button>
-        <button
-          type="button"
-          class="photo-grid__match-btn"
-          :class="{ 'photo-grid__match-btn--active': searchMode === 'any' }"
-          @click="searchMode = 'any'"
-        >Any</button>
+          class="photo-grid__order"
+          :aria-label="sortOrder === 'asc' ? 'Ascending' : 'Descending'"
+          @click="sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path v-if="sortOrder === 'asc'" d="M6 9.5V2.5M3 5.5L6 2.5L9 5.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path v-else d="M6 2.5V9.5M3 6.5L6 9.5L9 6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -751,14 +802,24 @@ watch(cellSize, (_newSize, oldSize) => {
         <div v-for="n in 18" :key="n" class="photo-grid__skeleton-cell" />
       </div>
 
-      <p
+      <div
         v-else-if="!loading && photos.length === 0"
         class="photo-grid__empty"
       >
-        {{ searchDebounced
-            ? `No photos match ${searchMode === 'all' ? 'all' : 'any'} of: ${searchTokens.join(', ')}.`
-            : 'No photos yet — point Kestrel at a folder and scan.' }}
-      </p>
+        <svg class="photo-grid__empty-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+          <rect x="6" y="10" width="36" height="28" rx="3" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="17" cy="21" r="3" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M6 32L18 22L28 30L36 24L42 28" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        <h3 class="photo-grid__empty-title">
+          {{ searchDebounced ? 'No matches' : 'No photos yet' }}
+        </h3>
+        <p class="photo-grid__empty-text">
+          {{ searchDebounced
+              ? `Nothing matches ${searchMode === 'all' ? 'all' : 'any'} of: ${searchTokens.join(', ')}.`
+              : 'Point Kestrel at a folder and scan to build your library.' }}
+        </p>
+      </div>
 
       <div
         v-else
@@ -842,106 +903,231 @@ watch(cellSize, (_newSize, oldSize) => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  gap: var(--space-5);
 }
+
+/* ── Bar (two rows, dense) ──────────────────────────────────── */
 .photo-grid__bar {
   display: flex;
+  flex-direction: column;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  flex-shrink: 0;
+}
+.photo-grid__row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
   flex-wrap: wrap;
 }
-.photo-grid__field {
+
+.photo-grid__field-wrap {
   flex: 1;
   min-width: 280px;
-  background: var(--surface-inset);
-  color: var(--text-primary);
-  border: var(--border-thin) solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: var(--space-3) var(--space-4);
-  box-shadow: var(--elev-inset);
-  font: var(--fw-regular) var(--fs-default) / 1.2 var(--font-sans);
+  position: relative;
+  display: flex;
+  align-items: center;
 }
+.photo-grid__field-icon {
+  position: absolute;
+  left: var(--space-4);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.photo-grid__field {
+  width: 100%;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-4) 0 28px;
+  height: 28px;
+  font: var(--fw-regular) var(--fs-small) / 1.2 var(--font-mono);
+  letter-spacing: 0;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+.photo-grid__field::placeholder {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.photo-grid__field:hover { border-color: var(--border-strong); }
 .photo-grid__field:focus {
   border-color: var(--accent);
+  background: var(--surface-hover);
   outline: none;
 }
-.photo-grid__btn {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-full);
-  padding: var(--space-3) var(--space-6);
-  font: var(--fw-medium) var(--fs-default) / 1 var(--font-sans);
-  box-shadow: var(--elev-raised);
-  cursor: pointer;
-}
-.photo-grid__btn:hover:not(:disabled) { background: var(--accent-hover); }
-.photo-grid__btn--secondary {
-  background: transparent;
-  color: var(--text-primary);
-  border: var(--border-thin) solid var(--border-subtle);
-  box-shadow: none;
-}
-.photo-grid__btn--secondary:hover:not(:disabled) {
-  background: var(--surface-inset);
-  border-color: var(--accent);
-}
-.photo-grid__btn--danger { background: var(--danger); }
-.photo-grid__btn--danger:hover:not(:disabled) { background: var(--danger); filter: brightness(1.1); }
-.photo-grid__btn:disabled {
-  background: #4A3A30;
-  color: var(--text-muted);
-  box-shadow: none;
-  cursor: not-allowed;
-}
-.photo-grid__select {
-  background: var(--surface-inset);
-  color: var(--text-primary);
-  border: var(--border-thin) solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-4);
-  font: inherit;
-}
-.photo-grid__select:focus { border-color: var(--accent); outline: none; }
-.photo-grid__search { flex: 1; min-width: 240px; }
 
-.photo-grid__match {
-  display: inline-flex;
-  background: var(--surface-inset);
-  border: var(--border-thin) solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  box-shadow: var(--elev-inset);
-  padding: var(--space-1);
-  gap: var(--space-1);
+.photo-grid__btn {
+  height: 28px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-5);
+  font: var(--fw-medium) var(--fs-small) / 1 var(--font-sans);
+  letter-spacing: var(--tracking-tight);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
-.photo-grid__match-btn {
+.photo-grid__btn--ghost {
   background: transparent;
   color: var(--text-secondary);
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-4);
-  font: var(--fw-medium) var(--fs-body) / 1 var(--font-sans);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  cursor: pointer;
 }
-.photo-grid__match-btn:hover { color: var(--text-primary); }
-.photo-grid__match-btn--active {
+.photo-grid__btn--ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+.photo-grid__btn--primary {
   background: var(--accent);
-  color: #fff;
-  box-shadow: var(--elev-raised);
+  color: #0A0A0B;
+  border-color: var(--accent);
+}
+.photo-grid__btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+.photo-grid__btn--danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.photo-grid__btn--danger:hover:not(:disabled) {
+  background: var(--danger-wash);
+}
+.photo-grid__btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
+/* ── Filters row ────────────────────────────────────────────── */
+.photo-grid__search {
+  flex: 1;
+  min-width: 240px;
+  min-height: 28px;
+  height: 28px;
+  padding: var(--space-1) var(--space-3);
+}
+
+.photo-grid__segmented {
+  display: inline-flex;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  height: 28px;
+  flex-shrink: 0;
+}
+.photo-grid__seg-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-4);
+  height: 100%;
+  font: var(--fw-semibold) var(--fs-micro) / 1 var(--font-sans);
+  letter-spacing: var(--tracking-micro);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.photo-grid__seg-btn:hover { color: var(--text-primary); }
+.photo-grid__seg-btn--active {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.photo-grid__select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.photo-grid__select {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 28px 0 var(--space-4);
+  height: 28px;
+  font: var(--fw-medium) var(--fs-small) / 1 var(--font-sans);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.photo-grid__select:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+.photo-grid__select:focus { outline: none; border-color: var(--accent); }
+.photo-grid__select-chev {
+  position: absolute;
+  right: var(--space-3);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.photo-grid__order {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.photo-grid__order:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+/* ── States ─────────────────────────────────────────────────── */
 .photo-grid__error {
   color: var(--danger);
-  background: var(--surface-inset);
-  padding: var(--space-3) var(--space-4);
+  background: var(--danger-wash);
+  padding: var(--space-4) var(--space-5);
   border-radius: var(--radius-md);
-  border: var(--border-thin) solid var(--danger);
+  border: 1px solid var(--danger);
+  font-size: var(--fs-small);
 }
 .photo-grid__empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
   color: var(--text-muted);
   text-align: center;
-  padding: var(--space-6);
+  padding: var(--space-9);
+}
+.photo-grid__empty-icon {
+  color: var(--text-faint);
+  margin-bottom: var(--space-2);
+}
+.photo-grid__empty-title {
+  margin: 0;
+  font: var(--fw-semibold) var(--fs-heading) / var(--lh-tight) var(--font-sans);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-secondary);
+}
+.photo-grid__empty-text {
+  margin: 0;
+  max-width: 340px;
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
 }
 
 .photo-grid__skeleton {
@@ -949,87 +1135,98 @@ watch(cellSize, (_newSize, oldSize) => {
   min-width: 0;
   overflow: hidden;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
-  gap: var(--space-4);
-  padding: var(--space-4);
-  background: var(--surface-inset);
-  box-shadow: var(--elev-inset);
-  border-radius: var(--radius-md);
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 2px;
+  padding: 0;
 }
 .photo-grid__skeleton-cell {
   aspect-ratio: 1 / 1;
-  border-radius: var(--radius-md);
-  background: linear-gradient(
-    90deg,
-    var(--surface-raised) 0%,
-    var(--surface-inset) 50%,
-    var(--surface-raised) 100%
-  );
-  background-size: 200% 100%;
-  animation: photo-grid-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  animation: photo-grid-pulse 1.6s ease-in-out infinite;
 }
-@keyframes photo-grid-shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+@keyframes photo-grid-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
 }
 
+/* ── Main content ───────────────────────────────────────────── */
 .photo-grid__content {
   flex: 1;
   display: flex;
-  gap: var(--space-4);
+  gap: var(--space-5);
   min-height: 0;
 }
 
 .photo-grid__panel-empty {
-  width: 360px;
-  flex-shrink: 0;
-  background: var(--surface-raised);
-  color: var(--text-muted);
-  box-shadow: var(--elev-raised);
-  border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-5);
-  text-align: center;
-  font-size: var(--fs-body);
+  display: none; /* keep DOM but invisible — density first */
 }
-.photo-grid__panel-empty p { margin: 0; }
 
 .photo-grid__scroller {
   flex: 1;
   min-width: 0;
   overflow: auto;
   background: var(--surface-inset);
-  box-shadow: var(--elev-inset);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   outline: none;
 }
 .photo-grid__spacer {
   position: relative;
   width: 100%;
 }
+
 .photo-grid__cell {
   position: absolute;
   top: 0;
   left: 0;
-  width: calc(var(--cell-size, 280px) - 24px);
-  height: calc(var(--cell-size, 280px) - 24px);
-  margin: 12px;
+  width: calc(var(--cell-size, 280px) - 6px);
+  height: calc(var(--cell-size, 280px) - 6px);
+  margin: 3px;
   padding: 0;
-  border: 2px solid transparent;
-  border-radius: var(--radius-md);
+  border: none;
+  border-radius: var(--radius-xs);
   background: var(--surface-raised);
   overflow: hidden;
   cursor: pointer;
   will-change: transform;
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
 }
-.photo-grid__cell:hover { border-color: var(--border-subtle); }
-.photo-grid__cell--focused { border-color: var(--accent); }
+.photo-grid__cell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  pointer-events: none;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.photo-grid__cell:hover::after {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.photo-grid__cell:hover {
+  z-index: 2;
+}
+.photo-grid__cell--focused::after {
+  box-shadow: inset 0 0 0 2px var(--accent-muted);
+}
+.photo-grid__cell--selected::after {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 .photo-grid__cell--selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent), 0 0 14px var(--accent-glow);
+  z-index: 3;
 }
+.photo-grid__cell--selected::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent-wash);
+  pointer-events: none;
+  z-index: 1;
+}
+
 .photo-grid__thumb {
   width: 100%;
   height: 100%;
@@ -1040,9 +1237,8 @@ watch(cellSize, (_newSize, oldSize) => {
 .photo-grid__marquee {
   position: absolute;
   pointer-events: none;
-  background: var(--accent-glow);
-  border: var(--border-thin) solid var(--accent);
-  border-radius: var(--radius-sm);
-  mix-blend-mode: screen;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
 }
 </style>

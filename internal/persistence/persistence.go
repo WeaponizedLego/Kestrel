@@ -29,7 +29,12 @@ const magic = "KSTL"
 // CurrentVersion is the schema version this build writes. Bump it when
 // the Photo struct gains/loses fields in a way old readers can't
 // handle, and add a branch in Load to migrate the older payload.
-const CurrentVersion uint32 = 1
+//
+// v1: initial schema (identity + EXIF + Tags).
+// v2: adds AutoTags []string and PHash uint64 (see assisted tagging).
+//     v1 payloads are forward-compatible because gob zero-fills absent
+//     fields, so Load accepts both versions; next Save rewrites as v2.
+const CurrentVersion uint32 = 2
 
 // header is the first gob-encoded value in every metadata file. Kept
 // deliberately small so a future migration can read it without
@@ -48,6 +53,14 @@ var ErrUnknownVersion = errors.New("unknown metadata file version")
 // ErrBadMagic is returned by Load when the file does not start with
 // the expected magic string — almost certainly the wrong file.
 var ErrBadMagic = errors.New("not a kestrel metadata file")
+
+// isSupportedVersion reports whether Load knows how to decode v.
+// Forward compatibility is one-way: v1 payloads decode cleanly because
+// gob zero-fills the AutoTags/PHash fields that didn't exist at write
+// time. A newer-than-known version is rejected rather than guessed at.
+func isSupportedVersion(v uint32) bool {
+	return v >= 1 && v <= CurrentVersion
+}
 
 // Save writes photos to path atomically: it encodes to a sibling
 // "<path>.tmp" file first, fsyncs, then renames over the destination.
@@ -110,8 +123,8 @@ func Load(path string) ([]*library.Photo, error) {
 	if h.Magic != magic {
 		return nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
 	}
-	if h.Version != CurrentVersion {
-		return nil, fmt.Errorf("checking version in %s (got %d, want %d): %w",
+	if !isSupportedVersion(h.Version) {
+		return nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
 			path, h.Version, CurrentVersion, ErrUnknownVersion)
 	}
 

@@ -1,0 +1,82 @@
+/* Global base styles. Pairs with tokens.css. Everything else is in
+   scoped component styles. */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-default);
+  line-height: var(--lh-body);
+  letter-spacing: var(--tracking-tight);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "ss03", "cv11";
+}
+
+body {
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--text-primary);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+  border-radius: var(--radius-sm);
+}
+
+button {
+  font-family: inherit;
+  letter-spacing: inherit;
+}
+
+/* Thin, unobtrusive scrollbars across the app. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--radius-full);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+
+/* Numbers that sit still — lists, tables, EXIF. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Monospace with tighter feel for numeric readouts. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "ss01", "ss02";
+}

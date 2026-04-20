@@ -22,9 +22,9 @@
 ## Island Hydration Model
 
 The build emits a **mostly-static HTML shell** plus one JS bundle per interactive region.
-Each region — `PhotoGrid`, `PhotoViewer`, `Sidebar`, `Toolbar`, `StatusBar` — is its own Vue
-app, mounted on a DOM node the shell placed for it. There is no root `<App>` hydrating the
-whole tree.
+Each region — `PhotoGrid`, `PhotoViewer`, `Sidebar`, `Toolbar`, `StatusBar`, `TaggingQueue` —
+is its own Vue app, mounted on a DOM node the shell placed for it. There is no root `<App>`
+hydrating the whole tree.
 
 **Why:** most of the chrome never re-renders. Paying the cost of hydrating the entire tree
 on every startup would be wasteful, and it gives us no practical benefit over mounting only
@@ -137,7 +137,16 @@ onEvent('scan:progress', (data: { processed: number; total: number }) => {
 ```
 
 Commands always go through REST; the WebSocket is for server-pushed events only
-(`scan:progress`, `thumbnail:ready`, `library:updated`, …).
+(`scan:progress`, `thumbnail:ready`, `library:updated`, `clusters:ready`, …).
+
+### Event catalog
+
+| Event              | Payload shape                                              | Emitted by                  |
+| ------------------ | ---------------------------------------------------------- | --------------------------- |
+| `scan:progress`    | `{ processed: number, total: number }`                     | Scanner worker pool         |
+| `thumbnail:ready`  | `{ path: string }`                                         | Pre-fetcher / LRU cache     |
+| `library:updated`  | `{ reason: "scan" \| "tag-apply" \| "delete" }`            | Library mutations           |
+| `clusters:ready`   | `{ kind: "duplicate" \| "similar" }`                       | `internal/library/cluster/` background compute (see `docs/assisted-tagging.md`) |
 
 ---
 
@@ -151,7 +160,8 @@ App.vue
 │   └── MainArea.vue
 │       ├── PhotoGrid.vue     # Virtualized thumbnail grid
 │       │   └── PhotoCard.vue # Single thumbnail + overlay info
-│       └── PhotoViewer.vue   # Full-resolution image view
+│       ├── PhotoViewer.vue   # Full-resolution image view
+│       └── TaggingQueue.vue  # Cluster-first tagging view (see docs/assisted-tagging.md)
 └── StatusBar.vue             # Scan progress, photo count, memory usage
 ```
 

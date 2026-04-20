@@ -39,6 +39,11 @@ type Config struct {
 	// ThumbsHandler handles /api/thumb and prefetch hint endpoints.
 	ThumbsHandler *api.ThumbsHandler
 
+	// TaggingHandler handles /api/clusters and /api/tagging/* endpoints.
+	// Optional: passing nil disables assisted tagging without breaking
+	// the rest of the API surface.
+	TaggingHandler *api.TaggingHandler
+
 	// Hub fans events out to /ws subscribers. Required.
 	Hub *Hub
 }
@@ -78,6 +83,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	cfg.LibraryHandler.Register(apiMux)
 	if cfg.ThumbsHandler != nil {
 		cfg.ThumbsHandler.Register(apiMux)
+	}
+	if cfg.TaggingHandler != nil {
+		cfg.TaggingHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, http.StripPrefix("/api", apiMux)))
 }

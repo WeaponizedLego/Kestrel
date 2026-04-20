@@ -67,9 +67,11 @@ kestrel/
 │       └── main.go         # Wires internal packages, starts server, launches browser
 ├── internal/
 │   ├── library/            # In-memory photo store (map + RWMutex) + Photo struct
+│   │   └── cluster/        # Perceptual-hash index + clustering queries (duplicate / similar)
 │   ├── scanner/            # Directory walking & worker pool
 │   ├── thumbnail/          # ThumbnailProvider interface, LRU cache, pack file, pre-fetcher
 │   ├── metadata/           # EXIF / file metadata extraction
+│   │   └── autotag/        # Derives auto-tags (camera, place, kind, …) from EXIF + FS + GeoNames
 │   ├── persistence/        # .gob serialization & deserialization (metadata only)
 │   ├── server/             # net/http server, router, WebSocket hub, auth-token middleware
 │   ├── api/                # HTTP handlers — thin wrappers over internal/ logic (JSON in/out)
@@ -208,7 +210,7 @@ Persistence is split into two files to enable progressive startup. Metadata load
 | Aspect            | Detail                                                                                                    |
 | ----------------- | --------------------------------------------------------------------------------------------------------- |
 | **Format**        | `encoding/gob` — Go-native binary serialization.                                                          |
-| **Contents**      | The full `map[string]*Photo` — paths, hashes, EXIF data, dimensions, dates, tags. **No thumbnail bytes.** |
+| **Contents**      | The full `map[string]*Photo` — paths, hashes, EXIF data, dimensions, dates, user `Tags`, derived `AutoTags`, and `PHash` (perceptual hash). **No thumbnail bytes.** |
 | **Size estimate** | ~200 bytes/photo → ~200 MB at 1M photos.                                                                  |
 | **Load**          | Startup reads into the in-memory map synchronously. Missing file = fresh library.                         |
 | **Save triggers** | Application exit, manual sync button, periodic auto-save (configurable interval).                         |
@@ -239,6 +241,17 @@ Persistence is split into two files to enable progressive startup. Metadata load
 ```
 
 The index is small enough to reside fully in RAM: 1M entries × ~44 bytes ≈ 44 MB.
+
+### Embedded Static Assets
+
+Alongside the frontend bundle, Kestrel embeds a small number of static datasets directly
+into the binary via `//go:embed`. These are read-only and contribute to the
+single-binary, no-external-files deployment promise.
+
+| Asset                       | Size       | Purpose                                                              |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| `frontend/dist/*`           | ~few MB    | Built Vue frontend (see **Localhost HTTP Server** below).            |
+| GeoNames `cities500.txt`    | ~10 MB     | Offline reverse-geocode for GPS → `place:*` / `country:*` auto-tags. See `docs/assisted-tagging.md`. |
 
 ---
 

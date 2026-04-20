@@ -10,8 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.4.0",
-    "@vue/server-renderer": "^3.4.0"
+    "@vue/server-renderer": "^3.4.0",
+    "geist": "^1.7.0",
+    "vue": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

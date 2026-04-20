@@ -20,6 +20,9 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/api"
 	"github.com/WeaponizedLego/kestrel/internal/assets"
 	"github.com/WeaponizedLego/kestrel/internal/library"
+	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
+	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
+	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag/geoindex"
 	"github.com/WeaponizedLego/kestrel/internal/persistence"
 	"github.com/WeaponizedLego/kestrel/internal/platform"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
@@ -128,15 +131,34 @@ func run(devMode bool, bind string) error {
 	provider := buildProvider(lib, pack, hub)
 	defer provider.Close()
 
+	// Assisted tagging wiring. Geoindex is a stub today (empty
+	// dataset) — when GeoNames cities500 is embedded, every caller
+	// here keeps working unchanged. Cluster manager reads the library
+	// lazily, so constructing it before the scanner runs is fine: it
+	// stays empty until the first /api/clusters call.
+	geoIdx := geoindex.New()
+	autotagOpts := autotag.Options{
+		FolderTags: false,
+		Geo:        geoIdx,
+	}
+	clusterMgr := cluster.NewManager(lib)
+
 	runner := scanner.NewRunner(scanner.RunnerConfig{
 		Library:     lib,
 		Publisher:   hub,
 		ThumbStore:  pack,
-		Thumbnailer: thumbnail.Generate,
+		Thumbnailer: thumbnail.GenerateWithHash,
+		Autotag:     autotagOpts,
 		// Flush metadata right after every scan — a cancelled scan
 		// loses nothing more than whatever failed to save before the
-		// next tick, instead of up to autoSaveInterval.
+		// next tick, instead of up to autoSaveInterval. The cluster
+		// cache is invalidated so the next Tagging Queue query sees
+		// the freshly-hashed photos.
 		OnFinish: func(added int, cancelled bool) {
+			clusterMgr.Invalidate()
+			hub.Publish("clusters:ready", map[string]any{
+				"reason": "scan-complete",
+			})
 			if err := persistence.Save(metaPath, lib.AllPhotos()); err != nil {
 				slog.Error("post-scan save failed", "path", metaPath, "err", err)
 			}
@@ -145,6 +167,7 @@ func run(devMode bool, bind string) error {
 
 	libraryHandler := api.NewLibraryHandler(lib, runner, hub)
 	thumbsHandler := api.NewThumbsHandler(provider)
+	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
 
 	var token string
 	if devMode {
@@ -171,6 +194,7 @@ func run(devMode bool, bind string) error {
 		DevMode:        devMode,
 		LibraryHandler: libraryHandler,
 		ThumbsHandler:  thumbsHandler,
+		TaggingHandler: taggingHandler,
 		Hub:            hub,
 	})
 	if err != nil {

@@ -125,68 +125,103 @@ async function applyTags(tags: string[]) {
 
 <style scoped>
 .summary {
-  width: 360px;
+  width: 320px;
   flex-shrink: 0;
   background: var(--surface-raised);
   color: var(--text-primary);
-  box-shadow: var(--elev-raised);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  font-size: var(--fs-small);
 }
 .summary__head {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  background: var(--surface-inset);
-  box-shadow: var(--elev-inset);
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .summary__close {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   background: transparent;
-  color: var(--text-primary);
-  border: var(--border-thin) solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: var(--fs-body);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
 }
-.summary__close:hover { border-color: var(--accent); }
+.summary__close:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
 .summary__title {
   margin: 0;
-  font: var(--fw-medium) var(--fs-subhead) / 1.2 var(--font-sans);
+  font: var(--fw-semibold) var(--fs-subhead) / var(--lh-tight) var(--font-sans);
+  letter-spacing: var(--tracking-tight);
 }
 
 .summary__meta {
   margin: 0;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .summary__row {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: var(--space-3);
 }
-.summary__row dt { color: var(--text-secondary); font-size: var(--fs-body); margin: 0; }
-.summary__row dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.summary__row dt {
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-micro);
+  text-transform: uppercase;
+  margin: 0;
+}
+.summary__row dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
 
 .summary__section {
-  padding: var(--space-3) var(--space-4);
-  border-top: var(--border-thin) solid var(--border-subtle);
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
+.summary__section:last-child { border-bottom: none; }
 .summary__section h3 {
   margin: 0;
-  font: var(--fw-medium) var(--fs-body) / 1 var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-micro);
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
-.summary__muted { color: var(--text-muted); font-size: var(--fs-body); margin: 0; }
+.summary__muted {
+  color: var(--text-muted);
+  font-size: var(--fs-small);
+  margin: 0;
+}
 .summary__error { color: var(--danger); }
 
 .summary__pills {
@@ -198,12 +233,16 @@ async function applyTags(tags: string[]) {
   gap: var(--space-2);
 }
 .summary__pill {
-  border: var(--border-thin) solid var(--accent);
+  background: var(--accent-wash);
   color: var(--accent);
-  border-radius: var(--radius-full);
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--fs-caption);
-  letter-spacing: var(--tracking-label);
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-3);
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-micro);
   text-transform: uppercase;
   line-height: 1;
 }

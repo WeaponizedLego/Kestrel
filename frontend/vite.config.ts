@@ -30,10 +30,12 @@ function injectDevToken(): PluginOption {
 }
 
 const islandEntries = {
-  sidebar:   'src/islands/Sidebar.entry.ts',
-  toolbar:   'src/islands/Toolbar.entry.ts',
-  photoGrid: 'src/islands/PhotoGrid.entry.ts',
-  statusBar: 'src/islands/StatusBar.entry.ts',
+  sidebar:      'src/islands/Sidebar.entry.ts',
+  toolbar:      'src/islands/Toolbar.entry.ts',
+  photoGrid:    'src/islands/PhotoGrid.entry.ts',
+  statusBar:    'src/islands/StatusBar.entry.ts',
+  taggingQueue: 'src/islands/TaggingQueue.entry.ts',
+  duplicates:   'src/islands/Duplicates.entry.ts',
 }
 
 export default defineConfig({
