@@ -35,7 +35,7 @@ func newFileOpsTestMux(t *testing.T) (*http.ServeMux, *library.Library, string) 
 	})
 
 	mux := http.NewServeMux()
-	NewFileOpsHandler(mgr).Register(mux)
+	NewFileOpsHandler(mgr, nil, nil).Register(mux)
 	return mux, lib, dir
 }
 

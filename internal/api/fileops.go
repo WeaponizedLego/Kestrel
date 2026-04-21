@@ -6,19 +6,31 @@ import (
 	"net/http"
 
 	"github.com/WeaponizedLego/kestrel/internal/fileops"
+	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
+	"github.com/WeaponizedLego/kestrel/internal/scanner"
 )
 
 // FileOpsHandler serves /api/files/* — the destructive endpoints.
 // It's thin on purpose: the Manager already owns journaling,
 // validation, and batch semantics. The handler decodes, dispatches,
-// and encodes.
+// and encodes. It also owns the post-mutation side effects that sit
+// outside the Manager's contract: invalidating the cluster cache and
+// broadcasting "library:updated" so the UI refetches derived views
+// (duplicates, tagging queue).
 type FileOpsHandler struct {
-	mgr *fileops.Manager
+	mgr       *fileops.Manager
+	clusters  *cluster.Manager
+	publisher scanner.Publisher
 }
 
-// NewFileOpsHandler wires the handler to a Manager.
-func NewFileOpsHandler(mgr *fileops.Manager) *FileOpsHandler {
-	return &FileOpsHandler{mgr: mgr}
+// NewFileOpsHandler wires the handler to a Manager, the cluster cache
+// (invalidated after a successful delete so duplicate/auto-tag views
+// stop showing removed photos), and an optional event publisher used
+// to broadcast "library:updated" after a mutation. Passing nil for
+// clusters or publisher disables the corresponding side effect but
+// leaves the mutation itself intact.
+func NewFileOpsHandler(mgr *fileops.Manager, clusters *cluster.Manager, publisher scanner.Publisher) *FileOpsHandler {
+	return &FileOpsHandler{mgr: mgr, clusters: clusters, publisher: publisher}
 }
 
 // Register attaches routes. /api prefix is stripped by the server.
@@ -87,6 +99,23 @@ func (h *FileOpsHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	successes := 0
+	for _, r := range results {
+		if r.Success {
+			successes++
+		}
+	}
+	if successes > 0 {
+		if h.clusters != nil {
+			h.clusters.Invalidate()
+		}
+		if h.publisher != nil {
+			h.publisher.Publish("library:updated", map[string]any{
+				"deleted":   successes,
+				"permanent": req.Permanent,
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, summariseResults(results, "deleted"))
 }

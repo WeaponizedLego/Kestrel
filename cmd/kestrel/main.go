@@ -219,7 +219,7 @@ func run(devMode bool, bind string) error {
 		},
 		Publisher: hub,
 	})
-	fileOpsHandler := api.NewFileOpsHandler(fileOpsMgr)
+	fileOpsHandler := api.NewFileOpsHandler(fileOpsMgr, clusterMgr, hub)
 
 	var token string
 	if devMode {

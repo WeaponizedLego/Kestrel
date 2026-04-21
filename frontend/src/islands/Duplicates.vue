@@ -14,6 +14,7 @@ import { apiGet, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc } from '../transport/thumbs'
 import { onOpenDuplicates } from '../transport/tagging'
+import { requestDelete } from '../transport/fileops'
 import type { TagCluster } from '../types'
 
 const open = ref(false)
@@ -83,6 +84,16 @@ function onKey(e: KeyboardEvent): void {
   }
 }
 
+function deleteOne(path: string): void {
+  requestDelete([path])
+}
+
+function deleteExtras(): void {
+  const c = selectedCluster.value
+  if (!c || c.size < 2) return
+  requestDelete(c.members.slice(1))
+}
+
 function stepSelection(delta: number): void {
   if (clusters.value.length === 0) return
   const idx = clusters.value.findIndex((c) => c.id === selectedId.value)
@@ -128,10 +139,8 @@ onUnmounted(() => {
 
       <p class="dup__help">
         Near-identical shots — bursts, edits, or re-saves of the same
-        photo. Review each cluster to decide which copies to keep.
-        <span class="dup__coming-soon">Deletion is coming soon</span>;
-        today you can review groups and reveal originals in your file
-        manager.
+        photo. Review each cluster, then remove the extras or reveal
+        originals in your file manager.
       </p>
 
       <div v-if="clusters.length > 0" class="dup__summary">
@@ -202,13 +211,27 @@ onUnmounted(() => {
                     First by path (suggested keep)
                   </div>
                 </div>
+                <button
+                  v-if="i !== 0"
+                  class="dup__file-delete"
+                  type="button"
+                  @click="deleteOne(p)"
+                >
+                  Delete
+                </button>
               </li>
             </ul>
             <footer class="dup__footer">
+              <button
+                class="dup__delete-extras"
+                type="button"
+                :disabled="selectedCluster.size < 2"
+                @click="deleteExtras"
+              >
+                Delete {{ selectedCluster.size - 1 }} extra{{ selectedCluster.size - 1 === 1 ? '' : 's' }}
+              </button>
               <p class="dup__footer-note">
-                Per-cluster actions (keep one, move extras to trash) land
-                in the next iteration. For now, review and copy paths as
-                needed.
+                Keeps the suggested file; moves the others to trash (undoable).
               </p>
             </footer>
           </template>
@@ -274,10 +297,6 @@ onUnmounted(() => {
   color: var(--text-secondary);
   font-size: var(--fs-small);
   line-height: 1.5;
-}
-.dup__coming-soon {
-  color: var(--text-muted);
-  font-style: italic;
 }
 .dup__summary {
   display: flex;
@@ -427,9 +446,63 @@ onUnmounted(() => {
   letter-spacing: var(--tracking-micro);
   font-weight: var(--fw-semibold);
 }
+.dup__file-delete {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2, 4px);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  cursor: pointer;
+  opacity: 0.7;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.dup__file:hover .dup__file-delete {
+  opacity: 1;
+}
+.dup__file-delete:hover {
+  background: rgba(216, 75, 75, 0.12);
+  border-color: var(--danger);
+}
 .dup__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   padding: var(--space-3) var(--space-5);
   border-top: 1px solid var(--border-subtle);
+}
+.dup__delete-extras {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-2, 4px);
+  font-size: var(--fs-small);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  box-shadow: var(--elev-raised, 0 1px 2px rgba(0, 0, 0, 0.4));
+  transition:
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.dup__delete-extras:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.dup__delete-extras:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.95);
+}
+.dup__delete-extras:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .dup__footer-note {
   margin: 0;
