@@ -27,6 +27,8 @@ const islandEntries = [
   '/src/islands/StatusBar.entry.ts',
   '/src/islands/TaggingQueue.entry.ts',
   '/src/islands/Duplicates.entry.ts',
+  '/src/islands/TagManager.entry.ts',
+  '/src/islands/FileOps.entry.ts',
 ]
 
 async function main() {

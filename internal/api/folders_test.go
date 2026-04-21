@@ -16,7 +16,7 @@ func TestFolders_TreeFromLivePhotos(t *testing.T) {
 	lib.AddPhoto(&library.Photo{Path: "/mnt/a/sub/three.jpg", Name: "three.jpg"})
 	lib.AddPhoto(&library.Photo{Path: "/mnt/b/four.jpg", Name: "four.jpg"})
 
-	h := NewLibraryHandler(lib, nil, nil)
+	h := NewLibraryHandler(lib, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -81,7 +81,7 @@ func TestPhotos_FolderFilter(t *testing.T) {
 	lib.AddPhoto(&library.Photo{Path: "/mnt/a/sub/two.jpg", Name: "two.jpg"})
 	lib.AddPhoto(&library.Photo{Path: "/mnt/b/three.jpg", Name: "three.jpg"})
 
-	h := NewLibraryHandler(lib, nil, nil)
+	h := NewLibraryHandler(lib, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -115,7 +115,7 @@ func TestPhotos_FolderFilterNoPrefixCollision(t *testing.T) {
 	lib.AddPhoto(&library.Photo{Path: "/p/a.jpg", Name: "a.jpg"})
 	lib.AddPhoto(&library.Photo{Path: "/pub/b.jpg", Name: "b.jpg"})
 
-	h := NewLibraryHandler(lib, nil, nil)
+	h := NewLibraryHandler(lib, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 

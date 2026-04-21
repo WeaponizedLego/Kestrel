@@ -4,9 +4,17 @@ import {
   CELL_SIZE_MIN,
   CELL_SIZE_MAX,
   CELL_SIZE_STEP,
+  selectedPaths,
 } from '../transport/selection'
-import { computed } from 'vue'
-import { openTaggingQueue, openDuplicates } from '../transport/tagging'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { openTaggingQueue, openDuplicates, openTagManager } from '../transport/tagging'
+import {
+  apiUndoDepth,
+  requestDelete,
+  requestMove,
+  requestUndo,
+} from '../transport/fileops'
+import { onEvent } from '../transport/events'
 
 const fillPct = computed(() => {
   const range = CELL_SIZE_MAX - CELL_SIZE_MIN
@@ -14,10 +22,85 @@ const fillPct = computed(() => {
     ? ((cellSize.value - CELL_SIZE_MIN) / range) * 100
     : 0
 })
+
+const hasSelection = computed(() => selectedPaths.value.size > 0)
+const selectionLabel = computed(() => `${selectedPaths.value.size} selected`)
+
+// Undo depth is polled from the server rather than tracked locally so
+// restarts and concurrent clients stay in sync. Refreshed on mount +
+// whenever a fileops:done or fileops:undone event fires.
+const undoDepth = ref(0)
+async function refreshUndoDepth() {
+  try {
+    const res = await apiUndoDepth()
+    undoDepth.value = res.depth
+  } catch {
+    undoDepth.value = 0
+  }
+}
+
+let unsubDone: (() => void) | null = null
+let unsubUndone: (() => void) | null = null
+
+onMounted(() => {
+  refreshUndoDepth()
+  unsubDone = onEvent('fileops:done', refreshUndoDepth)
+  unsubUndone = onEvent('fileops:undone', refreshUndoDepth)
+})
+onBeforeUnmount(() => {
+  unsubDone?.()
+  unsubUndone?.()
+})
+
+function onMove() {
+  if (!hasSelection.value) return
+  requestMove([...selectedPaths.value])
+}
+function onDelete() {
+  if (!hasSelection.value) return
+  requestDelete([...selectedPaths.value])
+}
+function onUndo() {
+  if (undoDepth.value === 0) return
+  requestUndo()
+}
 </script>
 
 <template>
   <div class="toolbar">
+    <span v-if="hasSelection" class="toolbar__selection" aria-live="polite">
+      {{ selectionLabel }}
+    </span>
+    <button
+      class="toolbar__action"
+      type="button"
+      :disabled="!hasSelection"
+      @click="onMove"
+      title="Move selected photos to a folder"
+    >
+      <span class="toolbar__action-dot" aria-hidden="true"></span>
+      Move
+    </button>
+    <button
+      class="toolbar__action toolbar__action--danger"
+      type="button"
+      :disabled="!hasSelection"
+      @click="onDelete"
+      title="Delete selected photos"
+    >
+      <span class="toolbar__action-dot toolbar__action-dot--warn" aria-hidden="true"></span>
+      Delete
+    </button>
+    <button
+      class="toolbar__action"
+      type="button"
+      :disabled="undoDepth === 0"
+      @click="onUndo"
+      :title="undoDepth > 0 ? `Undo last operation (${undoDepth} undoable)` : 'Nothing to undo'"
+    >
+      <span class="toolbar__action-dot" aria-hidden="true"></span>
+      Undo
+    </button>
     <button
       class="toolbar__action"
       type="button"
@@ -35,6 +118,15 @@ const fillPct = computed(() => {
     >
       <span class="toolbar__action-dot" aria-hidden="true"></span>
       Tag queue
+    </button>
+    <button
+      class="toolbar__action"
+      type="button"
+      @click="openTagManager"
+      title="Rename, merge, or delete tags"
+    >
+      <span class="toolbar__action-dot" aria-hidden="true"></span>
+      Manage tags
     </button>
     <label class="toolbar__size">
       <span class="toolbar__label">Size</span>
@@ -83,13 +175,27 @@ const fillPct = computed(() => {
   transition: background var(--dur-fast) var(--ease-out),
               border-color var(--dur-fast) var(--ease-out);
 }
-.toolbar__action:hover {
+.toolbar__action:hover:not(:disabled) {
   background: var(--surface-active);
   border-color: var(--border-strong, var(--border-subtle));
 }
 .toolbar__action:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.toolbar__action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.toolbar__action--danger:not(:disabled):hover {
+  border-color: var(--danger, #d94f4f);
+  color: var(--danger, #d94f4f);
+}
+.toolbar__selection {
+  font: var(--fw-medium) var(--fs-caption) / 1 var(--font-mono);
+  color: var(--accent);
+  letter-spacing: var(--tracking-tight);
+  padding: 0 var(--space-2);
 }
 .toolbar__action-dot {
   width: 6px;

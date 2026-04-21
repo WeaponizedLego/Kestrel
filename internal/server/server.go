@@ -44,6 +44,10 @@ type Config struct {
 	// the rest of the API surface.
 	TaggingHandler *api.TaggingHandler
 
+	// FileOpsHandler handles /api/files/{move,delete,undo} — the
+	// destructive endpoints. Optional: nil disables file operations.
+	FileOpsHandler *api.FileOpsHandler
+
 	// Hub fans events out to /ws subscribers. Required.
 	Hub *Hub
 }
@@ -86,6 +90,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.TaggingHandler != nil {
 		cfg.TaggingHandler.Register(apiMux)
+	}
+	if cfg.FileOpsHandler != nil {
+		cfg.FileOpsHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, http.StripPrefix("/api", apiMux)))
 }

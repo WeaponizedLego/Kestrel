@@ -1,0 +1,54 @@
+name: FileOps Safety
+
+# File operations are the only code path in Kestrel that destroys user
+# data. This workflow enforces the named invariants in
+# internal/fileops/invariants_test.go on every PR — if any of them
+# regress, the branch is blocked. See docs/fileops-safety.md for the
+# rationale; do not weaken or delete these gates without discussion.
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  invariants:
+    name: Invariant tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Named invariants
+        run: go test -v -run Test_Invariant_ ./internal/fileops/...
+      - name: Journal + trash packages
+        run: go test -v ./internal/fileops/journal/... ./internal/fileops/trash/...
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Race tests for fileops + library + api
+        run: go test -race ./internal/fileops/... ./internal/library/... ./internal/api/...
+
+  fuzz:
+    name: Journal replay fuzzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: FuzzReplay (30s budget)
+        # Short fuzz budget on every PR catches replay crashes without
+        # blowing CI time. A separate scheduled job can run longer.
+        run: go test -run=^$ -fuzz=FuzzReplay -fuzztime=30s ./internal/fileops/journal/...

@@ -19,6 +19,8 @@ export const Shell = defineComponent({
       // mount nodes; nothing is visible until the user triggers them.
       h('div',     { 'data-island': 'tagging-queue' }),
       h('div',     { 'data-island': 'duplicates' }),
+      h('div',     { 'data-island': 'tag-manager' }),
+      h('div',     { 'data-island': 'file-ops' }),
     ])
   },
 })

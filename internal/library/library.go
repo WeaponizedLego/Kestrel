@@ -13,6 +13,12 @@ import (
 // absent from the library.
 var ErrPhotoNotFound = errors.New("photo not found")
 
+// ErrDestinationExists is returned by RenamePhoto when the target path
+// is already present in the library — re-keying would silently
+// overwrite an unrelated photo, which we refuse at the boundary so the
+// caller can surface the collision rather than paper over it.
+var ErrDestinationExists = errors.New("destination path already in library")
+
 // HiddenTag is the magic tag that suppresses a photo from default
 // listings. Filtering by it lives in the API layer (see listPhotos);
 // the library treats it like any other tag. Kept here as the single
@@ -79,6 +85,56 @@ func (l *Library) GetPhoto(path string) (*Photo, error) {
 	if !ok {
 		return nil, fmt.Errorf("looking up %s: %w", path, ErrPhotoNotFound)
 	}
+	return p, nil
+}
+
+// RenamePhoto re-keys the photo at oldPath to newPath under a single
+// write lock. The Photo struct's Path and Name fields are updated in
+// place so downstream consumers that keep pointers (e.g. the cluster
+// manager snapshot) see the new identity on their next read.
+//
+// Returns ErrPhotoNotFound when oldPath is absent, or
+// ErrDestinationExists when newPath is already in use. The library is
+// not mutated on either error — callers can retry or fail cleanly.
+func (l *Library) RenamePhoto(oldPath, newPath string) error {
+	if oldPath == newPath {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p, ok := l.photos[oldPath]
+	if !ok {
+		return fmt.Errorf("renaming %s: %w", oldPath, ErrPhotoNotFound)
+	}
+	if _, clash := l.photos[newPath]; clash {
+		return fmt.Errorf("renaming %s to %s: %w", oldPath, newPath, ErrDestinationExists)
+	}
+	delete(l.photos, oldPath)
+	p.Path = newPath
+	p.Name = filepath.Base(newPath)
+	l.photos[newPath] = p
+	l.dirty = true
+	return nil
+}
+
+// RemovePhoto drops the photo at path from the library and returns the
+// removed pointer so callers (undo, restore flows) can reinsert it
+// later without a second scan. Returns ErrPhotoNotFound if path is
+// absent; the library is not mutated in that case.
+//
+// Files on disk are untouched — the caller is responsible for the
+// filesystem half of the operation. Keeping the split explicit lets
+// fileops.Manager order the journal, filesystem, and library steps
+// safely.
+func (l *Library) RemovePhoto(path string) (*Photo, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p, ok := l.photos[path]
+	if !ok {
+		return nil, fmt.Errorf("removing %s: %w", path, ErrPhotoNotFound)
+	}
+	delete(l.photos, path)
+	l.dirty = true
 	return p, nil
 }
 
@@ -189,6 +245,177 @@ func (l *Library) AddTagsToFolder(folder string, tags []string) int {
 		}
 	}
 	return updated
+}
+
+// RemovePhotosInFolder deletes every photo whose path lives under
+// folder (transitively — sub-folder photos are included). Files on
+// disk are not touched; only the in-memory index is pruned. Returns
+// the list of removed paths so callers can publish counts and
+// invalidate dependent caches (cluster cache, etc.) only when there
+// was real work to do.
+func (l *Library) RemovePhotosInFolder(folder string) []string {
+	prefix := strings.TrimRight(folder, string(filepath.Separator)) + string(filepath.Separator)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	removed := make([]string, 0)
+	for path := range l.photos {
+		if strings.HasPrefix(path, prefix) {
+			removed = append(removed, path)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	for _, path := range removed {
+		delete(l.photos, path)
+	}
+	l.dirty = true
+	return removed
+}
+
+// TagStat describes one tag and how many photos currently carry it.
+// Only user tags (Photo.Tags) are counted; AutoTags are derived on
+// every scan and shouldn't be shown as editable vocabulary.
+type TagStat struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// AllTags returns every distinct user tag and its photo count, sorted
+// by name. AutoTags are intentionally excluded — they regenerate on
+// every scan, so letting the user rename or delete them would be a
+// footgun. Hidden tag is included so the user can see and manage it.
+func (l *Library) AllTags() []TagStat {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	counts := make(map[string]int)
+	for _, p := range l.photos {
+		for _, t := range p.Tags {
+			counts[t]++
+		}
+	}
+	out := make([]TagStat, 0, len(counts))
+	for name, count := range counts {
+		out = append(out, TagStat{Name: name, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// RenameTag replaces every occurrence of old with new across the
+// library. Both are normalized first. Returns the number of photos
+// where new replaced old in place (renamed) and where the photo
+// already carried new so old was just dropped (absorbed).
+//
+// Rename preserves the original tag's position in each photo's slice
+// when the target isn't already present — useful so display order
+// doesn't jump around unexpectedly after a spelling fix.
+func (l *Library) RenameTag(old, next string) (renamed, absorbed int, err error) {
+	oldNorm := normalizeOne(old)
+	newNorm := normalizeOne(next)
+	if oldNorm == "" || newNorm == "" {
+		return 0, 0, fmt.Errorf("renaming tag: from and to are required")
+	}
+	if oldNorm == newNorm {
+		return 0, 0, fmt.Errorf("renaming tag: from and to are identical (%q)", oldNorm)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, p := range l.photos {
+		r, a := replaceTag(p, oldNorm, newNorm)
+		if r {
+			renamed++
+		}
+		if a {
+			absorbed++
+		}
+	}
+	return renamed, absorbed, nil
+}
+
+// MergeTags folds source into target across the library. Semantically
+// identical to RenameTag, but exposed separately so the API surface
+// matches user intent — "merge" means the caller knows both tags
+// currently exist. Returns per-photo counts the same way as RenameTag.
+func (l *Library) MergeTags(source, target string) (renamed, absorbed int, err error) {
+	srcNorm := normalizeOne(source)
+	tgtNorm := normalizeOne(target)
+	if srcNorm == "" || tgtNorm == "" {
+		return 0, 0, fmt.Errorf("merging tags: source and target are required")
+	}
+	if srcNorm == tgtNorm {
+		return 0, 0, fmt.Errorf("merging tags: source and target are identical (%q)", srcNorm)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, p := range l.photos {
+		r, a := replaceTag(p, srcNorm, tgtNorm)
+		if r {
+			renamed++
+		}
+		if a {
+			absorbed++
+		}
+	}
+	return renamed, absorbed, nil
+}
+
+// DeleteTag strips name from every photo that carries it. Returns the
+// number of photos actually modified. Unknown tags are a no-op — the
+// caller can decide whether to surface that to the user.
+func (l *Library) DeleteTag(name string) int {
+	norm := normalizeOne(name)
+	if norm == "" {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	affected := 0
+	for _, p := range l.photos {
+		idx := indexOfTag(p.Tags, norm)
+		if idx < 0 {
+			continue
+		}
+		p.Tags = append(p.Tags[:idx], p.Tags[idx+1:]...)
+		affected++
+	}
+	return affected
+}
+
+// replaceTag swaps old for next on one photo. Returns (renamed,
+// absorbed): renamed is true when old was present and next was not, so
+// the slot was overwritten in place; absorbed is true when both were
+// present, so old was removed and next stays. At most one of them is
+// true on any given photo.
+func replaceTag(p *Photo, old, next string) (renamed, absorbed bool) {
+	oldIdx := indexOfTag(p.Tags, old)
+	if oldIdx < 0 {
+		return false, false
+	}
+	if indexOfTag(p.Tags, next) >= 0 {
+		p.Tags = append(p.Tags[:oldIdx], p.Tags[oldIdx+1:]...)
+		return false, true
+	}
+	p.Tags[oldIdx] = next
+	return true, false
+}
+
+// indexOfTag returns the position of tag in tags, or -1 when absent.
+func indexOfTag(tags []string, tag string) int {
+	for i, t := range tags {
+		if t == tag {
+			return i
+		}
+	}
+	return -1
+}
+
+// normalizeOne applies the single-tag form of NormalizeTags. Returns
+// "" for inputs that would normalize to nothing (blank, whitespace).
+func normalizeOne(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
 }
 
 // mergeTags returns the union of existing and additions, preserving

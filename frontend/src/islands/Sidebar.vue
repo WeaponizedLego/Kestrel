@@ -121,6 +121,9 @@ const tagError = ref<string | null>(null)
 const tagBusy = ref(false)
 const tagPopoverOpen = ref(false)
 const tagInputRef = ref<InstanceType<typeof TagInput> | null>(null)
+const removePopoverOpen = ref(false)
+const removeBusy = ref(false)
+const removeError = ref<string | null>(null)
 
 function openMenu(e: MouseEvent, path: string) {
   e.preventDefault()
@@ -128,11 +131,15 @@ function openMenu(e: MouseEvent, path: string) {
   menuX.value = e.clientX
   menuY.value = e.clientY
   tagPopoverOpen.value = false
+  removePopoverOpen.value = false
+  removeError.value = null
 }
 
 function closeMenu() {
   menuFolder.value = null
   tagPopoverOpen.value = false
+  removePopoverOpen.value = false
+  removeError.value = null
 }
 
 function onEscape(e: KeyboardEvent) {
@@ -144,6 +151,30 @@ function startTagEntry() {
   tagError.value = null
   tagPopoverOpen.value = true
   nextTick(() => tagInputRef.value?.focus())
+}
+
+function startRemoveConfirm() {
+  removeError.value = null
+  removePopoverOpen.value = true
+}
+
+async function applyRemove() {
+  if (!menuFolder.value) {
+    closeMenu()
+    return
+  }
+  removeBusy.value = true
+  removeError.value = null
+  try {
+    await apiPost<{ removed: number }>('/api/folder/remove', {
+      folder: menuFolder.value,
+    })
+    closeMenu()
+  } catch (err) {
+    removeError.value = friendlyError(err)
+  } finally {
+    removeBusy.value = false
+  }
 }
 
 async function applyTags() {
@@ -226,7 +257,7 @@ async function applyTags() {
 
     <Teleport to="body">
       <div
-        v-if="menuFolder && !tagPopoverOpen"
+        v-if="menuFolder && !tagPopoverOpen && !removePopoverOpen"
         class="sidebar__menu"
         :style="{ left: menuX + 'px', top: menuY + 'px' }"
         role="menu"
@@ -240,6 +271,46 @@ async function applyTags() {
         >
           Add tag to all photos in folder…
         </button>
+        <button
+          type="button"
+          class="sidebar__menu-item sidebar__menu-item--danger"
+          role="menuitem"
+          @click="startRemoveConfirm"
+        >
+          Remove folder from index…
+        </button>
+      </div>
+
+      <div
+        v-if="menuFolder && removePopoverOpen"
+        class="sidebar__popover"
+        :style="{ left: menuX + 'px', top: menuY + 'px' }"
+        role="dialog"
+        aria-label="Remove folder from index"
+        @click.stop
+        @keydown.enter="applyRemove"
+      >
+        <p class="sidebar__popover-title" :title="menuFolder">
+          Remove <span class="sidebar__popover-path">{{ menuFolder }}</span> from the library?
+        </p>
+        <p class="sidebar__popover-body">
+          Files on disk are not deleted. Re-scanning the folder will bring them back.
+        </p>
+        <p v-if="removeError" class="sidebar__popover-error" role="alert">{{ removeError }}</p>
+        <div class="sidebar__popover-actions">
+          <button
+            type="button"
+            class="sidebar__popover-btn"
+            @click="closeMenu"
+            :disabled="removeBusy"
+          >Cancel</button>
+          <button
+            type="button"
+            class="sidebar__popover-btn sidebar__popover-btn--danger"
+            @click="applyRemove"
+            :disabled="removeBusy"
+          >{{ removeBusy ? 'Removing…' : 'Remove' }}</button>
+        </div>
       </div>
 
       <div
@@ -466,6 +537,11 @@ async function applyTags() {
   background: var(--accent-wash);
   color: var(--text-primary);
 }
+.sidebar__menu-item--danger { color: var(--danger); }
+.sidebar__menu-item--danger:hover {
+  background: var(--danger-wash);
+  color: var(--danger);
+}
 
 .sidebar__popover {
   position: fixed;
@@ -492,6 +568,12 @@ async function applyTags() {
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
+}
+.sidebar__popover-body {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-caption);
+  line-height: var(--leading-normal, 1.5);
 }
 .sidebar__popover-error { color: var(--danger); margin: 0; font-size: var(--fs-small); }
 .sidebar__popover-actions {
@@ -531,6 +613,22 @@ async function applyTags() {
 .sidebar__popover-btn--primary:disabled {
   background: var(--accent);
   border-color: var(--accent);
+  color: #0A0A0B;
+  opacity: 0.35;
+}
+.sidebar__popover-btn--danger {
+  background: var(--danger);
+  color: #0A0A0B;
+  border-color: var(--danger);
+}
+.sidebar__popover-btn--danger:hover:not(:disabled) {
+  background: var(--danger);
+  border-color: var(--danger);
+  filter: brightness(1.08);
+}
+.sidebar__popover-btn--danger:disabled {
+  background: var(--danger);
+  border-color: var(--danger);
   color: #0A0A0B;
   opacity: 0.35;
 }

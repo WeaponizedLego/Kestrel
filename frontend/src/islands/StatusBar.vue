@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onEvent } from '../transport/events'
 import { resyncing, resyncNotice } from '../transport/resync'
+import { undoToast, runUndoToast, clearUndoToast } from '../transport/undo'
 
 interface ScanProgress {
   processed: number
@@ -143,6 +144,24 @@ onBeforeUnmount(() => {
     <span v-if="photoCount !== null" class="status-bar__count">
       {{ photoCount.toLocaleString() }}<span class="status-bar__count-unit">&nbsp;photos</span>
     </span>
+
+    <span v-if="undoToast" class="status-bar__toast" role="status">
+      <span class="status-bar__toast-msg">{{ undoToast.message }}</span>
+      <button
+        class="status-bar__toast-undo"
+        type="button"
+        :disabled="undoToast.busy"
+        @click="runUndoToast"
+      >
+        {{ undoToast.busy ? '…' : 'Undo' }}
+      </button>
+      <button
+        class="status-bar__toast-dismiss"
+        type="button"
+        aria-label="Dismiss"
+        @click="clearUndoToast"
+      >✕</button>
+    </span>
   </div>
 </template>
 
@@ -238,4 +257,62 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   font-family: var(--font-sans);
 }
+
+.status-bar__toast {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: var(--space-4);
+  padding: 2px var(--space-3);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-popover, 0 4px 12px rgba(0,0,0,0.35));
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  color: var(--text-primary);
+  max-width: 420px;
+  animation: toast-rise var(--dur-base) var(--ease-out);
+}
+@keyframes toast-rise {
+  from { transform: translateY(4px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.status-bar__toast-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-bar__toast-undo {
+  height: 20px;
+  padding: 0 var(--space-3);
+  background: var(--accent);
+  color: #0A0A0B;
+  border: none;
+  border-radius: var(--radius-sm);
+  font: var(--fw-semibold) var(--fs-micro) / 1 var(--font-sans);
+  letter-spacing: var(--tracking-micro);
+  text-transform: uppercase;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.status-bar__toast-undo:hover:not(:disabled) { background: var(--accent-hover); }
+.status-bar__toast-undo:disabled { opacity: 0.5; cursor: wait; }
+.status-bar__toast-dismiss {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.status-bar__toast-dismiss:hover { color: var(--text-primary); }
 </style>

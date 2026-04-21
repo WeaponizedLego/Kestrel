@@ -31,6 +31,22 @@ func ThumbsPackPath() (string, error) {
 	return filepath.Join(dir, appDirName, "thumbs.pack"), nil
 }
 
+// FileOpsJournalPath returns the absolute path of fileops.journal
+// under the user's config directory. The journal is a durable record
+// of destructive operations, so it lives alongside library_meta.gob
+// in config rather than cache — wiping it would erase crash-recovery
+// state for in-flight moves/deletes.
+func FileOpsJournalPath() (string, error) {
+	return appDataPath("fileops.journal")
+}
+
+// TrashRootPath returns the absolute path of the Kestrel-managed
+// trash directory. Like library_meta.gob this is user data the app
+// must not silently lose; a future purge/retention job can prune it.
+func TrashRootPath() (string, error) {
+	return appDataPath("trash")
+}
+
 // appDataPath joins the per-user config directory with an app-owned
 // sub-path. Shared by LibraryMetaPath and any future config-dir files.
 func appDataPath(rel string) (string, error) {

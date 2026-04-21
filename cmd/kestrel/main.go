@@ -19,6 +19,9 @@ import (
 
 	"github.com/WeaponizedLego/kestrel/internal/api"
 	"github.com/WeaponizedLego/kestrel/internal/assets"
+	"github.com/WeaponizedLego/kestrel/internal/fileops"
+	"github.com/WeaponizedLego/kestrel/internal/fileops/journal"
+	"github.com/WeaponizedLego/kestrel/internal/fileops/trash"
 	"github.com/WeaponizedLego/kestrel/internal/library"
 	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
 	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
@@ -165,9 +168,58 @@ func run(devMode bool, bind string) error {
 		},
 	})
 
-	libraryHandler := api.NewLibraryHandler(lib, runner, hub)
+	libraryHandler := api.NewLibraryHandler(lib, runner, clusterMgr, hub)
 	thumbsHandler := api.NewThumbsHandler(provider)
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
+
+	// File operations: journal is write-ahead, trash is Kestrel-managed.
+	// Recovery runs before the HTTP server starts so any in-flight op
+	// from a crashed previous run is reconciled before the user can
+	// issue new ones.
+	journalPath, err := platform.FileOpsJournalPath()
+	if err != nil {
+		return fmt.Errorf("resolving fileops journal path: %w", err)
+	}
+	trashRoot, err := platform.TrashRootPath()
+	if err != nil {
+		return fmt.Errorf("resolving trash root: %w", err)
+	}
+	trashBin, err := trash.Open(trashRoot)
+	if err != nil {
+		return fmt.Errorf("opening trash bin: %w", err)
+	}
+
+	recoveryReport, err := fileops.Recover(journalPath, lib, trashBin)
+	if err != nil {
+		slog.Error("fileops recovery failed; continuing with best-effort state", "err", err)
+	} else if recoveryReport != nil && (len(recoveryReport.Forwarded)+len(recoveryReport.Rolled)+len(recoveryReport.Skipped)) > 0 {
+		slog.Info("fileops recovery",
+			"forwarded", len(recoveryReport.Forwarded),
+			"rolled", len(recoveryReport.Rolled),
+			"skipped", len(recoveryReport.Skipped),
+		)
+	}
+
+	fileJournal, err := journal.Open(journalPath)
+	if err != nil {
+		return fmt.Errorf("opening fileops journal: %w", err)
+	}
+	defer fileJournal.Close()
+
+	fileOpsMgr := fileops.New(fileops.Config{
+		Library: lib,
+		Journal: fileJournal,
+		Trash:   trashBin,
+		Persist: func() error {
+			return persistence.Save(metaPath, lib.AllPhotos())
+		},
+		ScanActive: func() bool {
+			id, _ := runner.Active()
+			return id != ""
+		},
+		Publisher: hub,
+	})
+	fileOpsHandler := api.NewFileOpsHandler(fileOpsMgr)
 
 	var token string
 	if devMode {
@@ -195,6 +247,7 @@ func run(devMode bool, bind string) error {
 		LibraryHandler: libraryHandler,
 		ThumbsHandler:  thumbsHandler,
 		TaggingHandler: taggingHandler,
+		FileOpsHandler: fileOpsHandler,
 		Hub:            hub,
 	})
 	if err != nil {

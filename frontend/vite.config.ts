@@ -36,6 +36,8 @@ const islandEntries = {
   statusBar:    'src/islands/StatusBar.entry.ts',
   taggingQueue: 'src/islands/TaggingQueue.entry.ts',
   duplicates:   'src/islands/Duplicates.entry.ts',
+  tagManager:   'src/islands/TagManager.entry.ts',
+  fileOps:      'src/islands/FileOps.entry.ts',
 }
 
 export default defineConfig({

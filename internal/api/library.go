@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
+	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
 	"github.com/WeaponizedLego/kestrel/internal/platform"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
 )
@@ -22,16 +23,20 @@ import (
 type LibraryHandler struct {
 	lib       *library.Library
 	runner    *scanner.Runner
+	clusters  *cluster.Manager
 	publisher scanner.Publisher
 }
 
 // NewLibraryHandler wires the handler to the shared library, scan
-// runner, and optional event publisher. The publisher is used to
-// broadcast "library:updated" when a mutation endpoint (e.g. bulk
-// tagging) changes what the UI sees; passing nil disables that
-// broadcast but leaves the mutation itself intact.
-func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, publisher scanner.Publisher) *LibraryHandler {
-	return &LibraryHandler{lib: lib, runner: runner, publisher: publisher}
+// runner, cluster manager, and optional event publisher. The cluster
+// manager is invalidated by mutation endpoints that drop photos from
+// the library so the next Tagging Queue query doesn't surface stale
+// members. The publisher is used to broadcast "library:updated" when
+// a mutation endpoint (e.g. bulk tagging) changes what the UI sees;
+// passing nil disables that broadcast but leaves the mutation itself
+// intact.
+func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, clusters *cluster.Manager, publisher scanner.Publisher) *LibraryHandler {
+	return &LibraryHandler{lib: lib, runner: runner, clusters: clusters, publisher: publisher}
 }
 
 // Register attaches every library route to mux. The server strips the
@@ -48,8 +53,134 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/reveal", h.reveal)
 	mux.HandleFunc("/tags", h.setTags)
 	mux.HandleFunc("/folder-tags", h.addFolderTags)
+	mux.HandleFunc("/folder/remove", h.removeFolder)
 	mux.HandleFunc("/tags/bulk", h.addBulkTags)
+	mux.HandleFunc("/tags/list", h.listTags)
+	mux.HandleFunc("/tags/rename", h.renameTag)
+	mux.HandleFunc("/tags/merge", h.mergeTags)
+	mux.HandleFunc("/tags/delete", h.deleteTag)
 	mux.HandleFunc("/resync", h.resync)
+}
+
+// listTags responds to GET /api/tags/list with the full user-tag
+// vocabulary (name + per-tag photo count), sorted by name. AutoTags
+// are excluded on purpose — see Library.AllTags.
+func (h *LibraryHandler) listTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.lib.AllTags())
+}
+
+// renameTagRequest is the JSON body for POST /api/tags/rename. Both
+// fields are required and must not normalize to the same value.
+type renameTagRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// renameTag responds to POST /api/tags/rename. Rewrites every photo
+// that carries `from` to carry `to` instead, de-duplicating when the
+// photo already has `to`. Returns the split counts so the UI can
+// report "renamed on N, absorbed into M existing".
+func (h *LibraryHandler) renameTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req renameTagRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	renamed, absorbed, err := h.lib.RenameTag(req.From, req.To)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if (renamed > 0 || absorbed > 0) && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"renamed-tag": req.From,
+			"to":          req.To,
+			"renamed":     renamed,
+			"absorbed":    absorbed,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{
+		"renamed":  renamed,
+		"absorbed": absorbed,
+	})
+}
+
+// mergeTagsRequest is the JSON body for POST /api/tags/merge.
+type mergeTagsRequest struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// mergeTags responds to POST /api/tags/merge. Same mechanics as
+// renameTag — kept as a distinct endpoint so the intent ("I know both
+// tags exist") stays legible in the API surface.
+func (h *LibraryHandler) mergeTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req mergeTagsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	renamed, absorbed, err := h.lib.MergeTags(req.Source, req.Target)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if (renamed > 0 || absorbed > 0) && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"merged-tag": req.Source,
+			"into":       req.Target,
+			"renamed":    renamed,
+			"absorbed":   absorbed,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{
+		"renamed":  renamed,
+		"absorbed": absorbed,
+	})
+}
+
+// deleteTagRequest is the JSON body for POST /api/tags/delete.
+type deleteTagRequest struct {
+	Name string `json:"name"`
+}
+
+// deleteTag responds to POST /api/tags/delete by stripping the named
+// tag from every photo that carries it. Returns the number of photos
+// actually modified.
+func (h *LibraryHandler) deleteTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req deleteTagRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	affected := h.lib.DeleteTag(req.Name)
+	if affected > 0 && h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"deleted-tag": req.Name,
+			"affected":    affected,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"affected": affected})
 }
 
 // bulkTagsRequest is the JSON body accepted by POST /api/tags/bulk.
@@ -172,6 +303,51 @@ func (h *LibraryHandler) addFolderTags(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"updated": updated})
+}
+
+// removeFolderRequest is the JSON body accepted by POST /api/folder/remove.
+type removeFolderRequest struct {
+	Folder string `json:"folder"`
+}
+
+// removeFolder responds to POST /api/folder/remove by deleting every
+// photo under folder (prefix match, same semantics as filterByFolder)
+// from the in-memory library. Files on disk are untouched — re-scanning
+// the same folder re-adds them. Invalidates the cluster cache and
+// publishes "library:updated" when anything was actually removed so
+// open grids and the Tagging Queue refresh.
+func (h *LibraryHandler) removeFolder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req removeFolderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Folder == "" {
+		writeError(w, http.StatusBadRequest, "folder is required")
+		return
+	}
+	if !filepath.IsAbs(req.Folder) {
+		writeError(w, http.StatusBadRequest, "folder must be absolute")
+		return
+	}
+
+	removed := h.lib.RemovePhotosInFolder(req.Folder)
+	if len(removed) > 0 {
+		if h.clusters != nil {
+			h.clusters.Invalidate()
+		}
+		if h.publisher != nil {
+			h.publisher.Publish("library:updated", map[string]any{
+				"folder":  req.Folder,
+				"removed": len(removed),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"removed": len(removed)})
 }
 
 // tagsRequest is the JSON body accepted by POST /api/tags. Tags is the

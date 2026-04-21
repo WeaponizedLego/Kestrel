@@ -24,6 +24,7 @@ import {
   addPathsToSelection,
 } from '../transport/selection'
 import { resyncing, runResync } from '../transport/resync'
+import { requestedSearchTokens } from '../transport/search'
 import type { Photo } from '../types'
 
 // Lazy-loaded so the viewer JS/CSS only downloads when a user opens
@@ -131,6 +132,15 @@ watch(searchTokens, (value) => {
     searchDebounced.value = value.join(' ')
   }, searchDebounceMs)
 }, { deep: true })
+
+// One-shot handoff from other islands (e.g. TagManager clicking a
+// tag) — copy the requested tokens into our own state and reset the
+// shared ref so a repeat click with the same tokens still fires.
+watch(requestedSearchTokens, (tokens) => {
+  if (tokens === null) return
+  searchTokens.value = [...tokens]
+  requestedSearchTokens.value = null
+})
 
 async function scan() {
   if (!folder.value) return
@@ -608,6 +618,8 @@ let unsubThumb: (() => void) | null = null
 let unsubLibrary: (() => void) | null = null
 let unsubScanStart: (() => void) | null = null
 let unsubScanDone: (() => void) | null = null
+let unsubFileOpsDone: (() => void) | null = null
+let unsubFileOpsUndone: (() => void) | null = null
 
 // The scroller only exists while the v-else branch is rendered (i.e.
 // there are photos to show). Watching the template ref means we hook
@@ -641,6 +653,12 @@ onMounted(() => {
     scanning.value = false
     cancelling.value = false
   })
+  // File ops mutate the library server-side; reloading is the
+  // simplest path to a correct grid. A future optimisation could
+  // patch in place using the `results` payload to avoid the full
+  // refetch on small batches.
+  unsubFileOpsDone = onEvent('fileops:done', () => loadPhotos())
+  unsubFileOpsUndone = onEvent('fileops:undone', () => loadPhotos())
   // Catch up after a page refresh that landed mid-scan — the events
   // above only cover future transitions.
   probeScanStatus()
@@ -663,6 +681,8 @@ onBeforeUnmount(() => {
   unsubLibrary?.()
   unsubScanStart?.()
   unsubScanDone?.()
+  unsubFileOpsDone?.()
+  unsubFileOpsUndone?.()
 })
 
 // loadPhotos runs on any server-shaping param change. Running it on
