@@ -70,7 +70,7 @@ Write for the next human to read the file, not for the compiler. Every change sh
 - **No JS-side sorting or filtering** over the photo list. Always call a REST endpoint that returns pre-sorted/filtered data from Go.
 - **Error wrapping.** Never `return err` bare. Always `fmt.Errorf("<doing what> for <which thing>: %w", err)`. Lowercase, no trailing punctuation.
 - **No `utils`/`helpers` packages.** One package = one responsibility.
-- **Frontend design skill.** Before any frontend/UI change (Vue components, islands, styles, layout, visuals), read and apply `.claude/skills/frontend-design/SKILL.md`. Its aesthetic direction must be honored alongside `docs/ui-design.md` and `docs/visual-design.md`.
+- **daisyUI-only UI.** All UI is built from daisyUI components (`btn`, `card`, `modal`, `menu`, `drawer`, `navbar`, `stats`, `progress`, `input`, `badge`, `alert`, `tabs`, `join`, …) on top of Tailwind v4. Drop to raw Tailwind utilities only for layout/spacing/typography. Hand-written CSS in `<style>` blocks is forbidden except where a documented runtime-dynamic constraint requires it (e.g. the `PhotoGrid` virtualization cell that needs CSS-var-driven sizing). Never reintroduce a custom design-token layer — the theme is whichever daisyUI built-in theme the user has selected via `ThemeController`.
 
 ## Go readability standards (from `docs/go-readability.md`)
 
@@ -95,7 +95,6 @@ PRs only; direct pushes to `develop` and `main` are blocked. Both checks are req
 
 - `docs/system-design.md` — architecture, data flow, package layout, concurrency patterns, persistence, HTTP + WS server integration, performance targets
 - `docs/ui-design.md` — Vue 3 + Vite island hydration, REST/WS transport, component hierarchy, thumbnail strategy, frontend performance rules
-- `docs/visual-design.md` — dark neo-skeuomorphic tactile visual system: design tokens, elevation recipe, per-component specs
 - `docs/go-readability.md` — Go style, naming, comments, error handling, interfaces, tests, file organization
 - `docs/assisted-tagging.md` — EXIF auto-tags, pHash clustering, Tagging Queue UX for fresh libraries
 - `.github/copilot-instructions.md` — the same "video game architecture" and transport rules, condensed for Copilot

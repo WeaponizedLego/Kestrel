@@ -713,50 +713,41 @@ watch(cellSize, (_newSize, oldSize) => {
 </script>
 
 <template>
-  <section class="photo-grid">
-    <header class="photo-grid__bar">
-      <div class="photo-grid__row photo-grid__row--primary">
-        <div class="photo-grid__field-wrap">
-          <svg class="photo-grid__field-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+  <section class="flex h-full min-h-0 flex-col gap-3">
+    <header class="flex flex-col gap-2 shrink-0">
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="input input-sm input-bordered flex flex-1 min-w-72 items-center gap-2 font-mono">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" class="opacity-60">
             <path d="M1.5 3C1.5 2.4 1.9 2 2.5 2H4.5L5.5 3H9.5C10.1 3 10.5 3.4 10.5 4V9C10.5 9.6 10.1 10 9.5 10H2.5C1.9 10 1.5 9.6 1.5 9V3Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
           </svg>
           <input
             v-model="folder"
-            class="photo-grid__field"
             type="text"
+            class="grow"
             placeholder="/absolute/path/to/photos"
             @keydown.enter="scan"
           />
-        </div>
-        <button
-          class="photo-grid__btn photo-grid__btn--ghost"
-          type="button"
-          :disabled="scanning"
-          @click="openPicker"
-        >
-          Browse
-        </button>
+        </label>
+        <button type="button" class="btn btn-sm btn-ghost" :disabled="scanning" @click="openPicker">Browse</button>
         <button
           v-if="!scanning"
-          class="photo-grid__btn photo-grid__btn--primary"
           type="button"
+          class="btn btn-sm btn-primary"
           :disabled="!folder"
           @click="scan"
-        >
-          Scan
-        </button>
+        >Scan</button>
         <button
           v-else
-          class="photo-grid__btn photo-grid__btn--danger"
           type="button"
+          class="btn btn-sm btn-error btn-outline"
           :disabled="cancelling"
           @click="cancelScan"
         >
           {{ cancelling ? 'Cancelling…' : 'Cancel' }}
         </button>
         <button
-          class="photo-grid__btn photo-grid__btn--ghost"
           type="button"
+          class="btn btn-sm btn-ghost"
           :disabled="resyncing || scanning"
           title="Check disk for deleted photos and drop missing entries"
           @click="runResync"
@@ -765,40 +756,33 @@ watch(cellSize, (_newSize, oldSize) => {
         </button>
       </div>
 
-      <div class="photo-grid__row photo-grid__row--filters">
+      <div class="flex flex-wrap items-center gap-2">
         <TagInput
           v-model="searchTokens"
-          class="photo-grid__search"
+          class="flex-1 min-w-60"
           placeholder="Search name or tag…"
           aria-label="Search photos by name or tag"
         />
-        <div class="photo-grid__segmented" role="group" aria-label="Match mode">
+        <div class="join" role="group" aria-label="Match mode">
           <button
             type="button"
-            class="photo-grid__seg-btn"
-            :class="{ 'photo-grid__seg-btn--active': searchMode === 'all' }"
+            :class="['btn btn-sm join-item', searchMode === 'all' ? 'btn-primary' : 'btn-ghost']"
             @click="searchMode = 'all'"
           >All</button>
           <button
             type="button"
-            class="photo-grid__seg-btn"
-            :class="{ 'photo-grid__seg-btn--active': searchMode === 'any' }"
+            :class="['btn btn-sm join-item', searchMode === 'any' ? 'btn-primary' : 'btn-ghost']"
             @click="searchMode = 'any'"
           >Any</button>
         </div>
-        <div class="photo-grid__select-wrap">
-          <select class="photo-grid__select" v-model="sortKey" aria-label="Sort by">
-            <option value="name">Name</option>
-            <option value="date">Date taken</option>
-            <option value="size">Size</option>
-          </select>
-          <svg class="photo-grid__select-chev" width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
-            <path d="M1.5 3L4 5.5L6.5 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </div>
+        <select class="select select-sm select-bordered" v-model="sortKey" aria-label="Sort by">
+          <option value="name">Name</option>
+          <option value="date">Date taken</option>
+          <option value="size">Size</option>
+        </select>
         <button
           type="button"
-          class="photo-grid__order"
+          class="btn btn-sm btn-square btn-ghost"
           :aria-label="sortOrder === 'asc' ? 'Ascending' : 'Descending'"
           @click="sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'"
         >
@@ -810,31 +794,36 @@ watch(cellSize, (_newSize, oldSize) => {
       </div>
     </header>
 
-    <div class="photo-grid__content">
-      <p v-if="error" class="photo-grid__error" role="alert">{{ error }}</p>
+    <div class="flex flex-1 min-h-0 gap-3">
+      <div v-if="error" role="alert" class="alert alert-error flex-1">{{ error }}</div>
 
       <div
         v-else-if="loading && photos.length === 0"
-        class="photo-grid__skeleton"
+        class="grid flex-1 min-w-0 gap-0.5 overflow-hidden p-0"
+        style="grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));"
         aria-label="Loading photos"
         aria-busy="true"
       >
-        <div v-for="n in 18" :key="n" class="photo-grid__skeleton-cell" />
+        <div
+          v-for="n in 18"
+          :key="n"
+          class="skeleton aspect-square rounded"
+        />
       </div>
 
       <div
         v-else-if="!loading && photos.length === 0"
-        class="photo-grid__empty"
+        class="flex flex-1 flex-col items-center justify-center gap-3 p-12 text-center text-base-content/50"
       >
-        <svg class="photo-grid__empty-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true" class="opacity-50">
           <rect x="6" y="10" width="36" height="28" rx="3" stroke="currentColor" stroke-width="1.5"/>
           <circle cx="17" cy="21" r="3" stroke="currentColor" stroke-width="1.5"/>
           <path d="M6 32L18 22L28 30L36 24L42 28" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
         </svg>
-        <h3 class="photo-grid__empty-title">
+        <h3 class="m-0 text-lg font-semibold text-base-content/70">
           {{ searchDebounced ? 'No matches' : 'No photos yet' }}
         </h3>
-        <p class="photo-grid__empty-text">
+        <p class="m-0 max-w-sm text-sm">
           {{ searchDebounced
               ? `Nothing matches ${searchMode === 'all' ? 'all' : 'any'} of: ${searchTokens.join(', ')}.`
               : 'Point Kestrel at a folder and scan to build your library.' }}
@@ -844,49 +833,49 @@ watch(cellSize, (_newSize, oldSize) => {
       <div
         v-else
         ref="scroller"
-        class="photo-grid__scroller"
+        class="flex-1 min-w-0 overflow-auto bg-base-200 border border-base-300 rounded-box outline-none"
         tabindex="0"
         @scroll.passive="onScroll"
         @mousedown="onScrollerMouseDown"
       >
-      <div
-        class="photo-grid__spacer"
-        :style="{ height: totalHeight + 'px', '--cell-size': cellSize + 'px' }"
-      >
-        <button
-          v-for="cell in visibleCells"
-          :key="cell.photo.Path"
-          class="photo-grid__cell"
-          :class="{
-            'photo-grid__cell--focused': cell.index === focused,
-            'photo-grid__cell--selected': selectedPaths.has(cell.photo.Path),
-          }"
-          :style="{ transform: `translate(${cell.x}px, ${cell.y}px)` }"
-          :data-index="cell.index"
-          @click="onCellClick(cell.index, $event)"
-          @focus="focused = cell.index"
-        >
-          <img
-            class="photo-grid__thumb"
-            :src="imgSrc(cell.photo.Path)"
-            :alt="cell.photo.Name"
-            loading="lazy"
-            decoding="async"
-          />
-        </button>
         <div
-          v-if="marqueeBox"
-          class="photo-grid__marquee"
-          :style="{
-            left: marqueeBox.left + 'px',
-            top: marqueeBox.top + 'px',
-            width: marqueeBox.width + 'px',
-            height: marqueeBox.height + 'px',
-          }"
-          aria-hidden="true"
-        />
+          class="photo-grid__spacer relative w-full"
+          :style="{ height: totalHeight + 'px', '--cell-size': cellSize + 'px' }"
+        >
+          <button
+            v-for="cell in visibleCells"
+            :key="cell.photo.Path"
+            class="photo-grid__cell"
+            :class="{
+              'photo-grid__cell--focused': cell.index === focused,
+              'photo-grid__cell--selected': selectedPaths.has(cell.photo.Path),
+            }"
+            :style="{ transform: `translate(${cell.x}px, ${cell.y}px)` }"
+            :data-index="cell.index"
+            @click="onCellClick(cell.index, $event)"
+            @focus="focused = cell.index"
+          >
+            <img
+              class="h-full w-full object-cover"
+              :src="imgSrc(cell.photo.Path)"
+              :alt="cell.photo.Name"
+              loading="lazy"
+              decoding="async"
+            />
+          </button>
+          <div
+            v-if="marqueeBox"
+            class="pointer-events-none absolute rounded border border-primary bg-primary/15"
+            :style="{
+              left: marqueeBox.left + 'px',
+              top: marqueeBox.top + 'px',
+              width: marqueeBox.width + 'px',
+              height: marqueeBox.height + 'px',
+            }"
+            aria-hidden="true"
+          />
+        </div>
       </div>
-    </div>
 
       <SelectionSummary
         v-if="multiSelection.length >= 2"
@@ -900,9 +889,6 @@ watch(cellSize, (_newSize, oldSize) => {
         @prev="openAt(viewerIndex - 1)"
         @next="openAt(viewerIndex + 1)"
       />
-      <aside v-else class="photo-grid__panel-empty" aria-hidden="true">
-        <p>Select a photo to see its details.</p>
-      </aside>
     </div>
 
     <Teleport to="body">
@@ -916,286 +902,14 @@ watch(cellSize, (_newSize, oldSize) => {
   </section>
 </template>
 
-<style scoped>
-.photo-grid {
-  color: var(--text-primary);
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  gap: var(--space-5);
-}
-
-/* ── Bar (two rows, dense) ──────────────────────────────────── */
-.photo-grid__bar {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  flex-shrink: 0;
-}
-.photo-grid__row {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.photo-grid__field-wrap {
-  flex: 1;
-  min-width: 280px;
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.photo-grid__field-icon {
-  position: absolute;
-  left: var(--space-4);
-  color: var(--text-muted);
-  pointer-events: none;
-}
-.photo-grid__field {
-  width: 100%;
-  background: var(--surface-raised);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-4) 0 28px;
-  height: 28px;
-  font: var(--fw-regular) var(--fs-small) / 1.2 var(--font-mono);
-  letter-spacing: 0;
-  transition: background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out);
-}
-.photo-grid__field::placeholder {
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-.photo-grid__field:hover { border-color: var(--border-strong); }
-.photo-grid__field:focus {
-  border-color: var(--accent);
-  background: var(--surface-hover);
-  outline: none;
-}
-
-.photo-grid__btn {
-  height: 28px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-5);
-  font: var(--fw-medium) var(--fs-small) / 1 var(--font-sans);
-  letter-spacing: var(--tracking-tight);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-.photo-grid__btn--ghost {
-  background: transparent;
-  color: var(--text-secondary);
-}
-.photo-grid__btn--ghost:hover:not(:disabled) {
-  color: var(--text-primary);
-  background: var(--surface-hover);
-  border-color: var(--border-strong);
-}
-.photo-grid__btn--primary {
-  background: var(--accent);
-  color: #0A0A0B;
-  border-color: var(--accent);
-}
-.photo-grid__btn--primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-.photo-grid__btn--danger {
-  background: transparent;
-  color: var(--danger);
-  border-color: var(--danger);
-}
-.photo-grid__btn--danger:hover:not(:disabled) {
-  background: var(--danger-wash);
-}
-.photo-grid__btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-/* ── Filters row ────────────────────────────────────────────── */
-.photo-grid__search {
-  flex: 1;
-  min-width: 240px;
-  min-height: 28px;
-  height: 28px;
-  padding: var(--space-1) var(--space-3);
-}
-
-.photo-grid__segmented {
-  display: inline-flex;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-  height: 28px;
-  flex-shrink: 0;
-}
-.photo-grid__seg-btn {
-  background: transparent;
-  color: var(--text-muted);
-  border: none;
-  border-radius: var(--radius-xs);
-  padding: 0 var(--space-4);
-  height: 100%;
-  font: var(--fw-semibold) var(--fs-micro) / 1 var(--font-sans);
-  letter-spacing: var(--tracking-micro);
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-.photo-grid__seg-btn:hover { color: var(--text-primary); }
-.photo-grid__seg-btn--active {
-  background: var(--accent-wash);
-  color: var(--accent);
-}
-
-.photo-grid__select-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-}
-.photo-grid__select {
-  background: var(--surface-raised);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 0 28px 0 var(--space-4);
-  height: 28px;
-  font: var(--fw-medium) var(--fs-small) / 1 var(--font-sans);
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
-  transition: border-color var(--dur-fast) var(--ease-out),
-              background var(--dur-fast) var(--ease-out);
-}
-.photo-grid__select:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-}
-.photo-grid__select:focus { outline: none; border-color: var(--accent); }
-.photo-grid__select-chev {
-  position: absolute;
-  right: var(--space-3);
-  color: var(--text-muted);
-  pointer-events: none;
-}
-
-.photo-grid__order {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--surface-raised);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: color var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out),
-              background var(--dur-fast) var(--ease-out);
-}
-.photo-grid__order:hover {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-}
-
-/* ── States ─────────────────────────────────────────────────── */
-.photo-grid__error {
-  color: var(--danger);
-  background: var(--danger-wash);
-  padding: var(--space-4) var(--space-5);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--danger);
-  font-size: var(--fs-small);
-}
-.photo-grid__empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-4);
-  color: var(--text-muted);
-  text-align: center;
-  padding: var(--space-9);
-}
-.photo-grid__empty-icon {
-  color: var(--text-faint);
-  margin-bottom: var(--space-2);
-}
-.photo-grid__empty-title {
-  margin: 0;
-  font: var(--fw-semibold) var(--fs-heading) / var(--lh-tight) var(--font-sans);
-  letter-spacing: var(--tracking-tight);
-  color: var(--text-secondary);
-}
-.photo-grid__empty-text {
-  margin: 0;
-  max-width: 340px;
-  font-size: var(--fs-small);
-  line-height: var(--lh-body);
-}
-
-.photo-grid__skeleton {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 2px;
-  padding: 0;
-}
-.photo-grid__skeleton-cell {
-  aspect-ratio: 1 / 1;
-  border-radius: var(--radius-xs);
-  background: var(--surface-raised);
-  animation: photo-grid-pulse 1.6s ease-in-out infinite;
-}
-@keyframes photo-grid-pulse {
-  0%, 100% { opacity: 0.55; }
-  50%      { opacity: 1; }
-}
-
-/* ── Main content ───────────────────────────────────────────── */
-.photo-grid__content {
-  flex: 1;
-  display: flex;
-  gap: var(--space-5);
-  min-height: 0;
-}
-
-.photo-grid__panel-empty {
-  display: none; /* keep DOM but invisible — density first */
-}
-
-.photo-grid__scroller {
-  flex: 1;
-  min-width: 0;
-  overflow: auto;
-  background: var(--surface-inset);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  outline: none;
-}
-.photo-grid__spacer {
-  position: relative;
-  width: 100%;
-}
-
+<!--
+  The cell layout uses absolute positioning + CSS-var-driven sizing so
+  virtualization can place thousands of thumbnails by transform alone.
+  These two selectors can't be expressed as Tailwind utilities because
+  the size is dynamic (driven by the user's cell-size slider) and the
+  focus/selection rings need to overlay the image via ::after.
+-->
+<style>
 .photo-grid__cell {
   position: absolute;
   top: 0;
@@ -1205,60 +919,28 @@ watch(cellSize, (_newSize, oldSize) => {
   margin: 3px;
   padding: 0;
   border: none;
-  border-radius: var(--radius-xs);
-  background: var(--surface-raised);
+  border-radius: 4px;
   overflow: hidden;
   cursor: pointer;
   will-change: transform;
-  transition: transform var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
+  background: oklch(var(--b3) / 1);
 }
 .photo-grid__cell::after {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  box-shadow: inset 0 0 0 1px oklch(var(--bc) / 0.12);
   pointer-events: none;
-  transition: box-shadow var(--dur-fast) var(--ease-out);
+  transition: box-shadow 120ms;
 }
 .photo-grid__cell:hover::after {
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-}
-.photo-grid__cell:hover {
-  z-index: 2;
+  box-shadow: inset 0 0 0 1px oklch(var(--bc) / 0.25);
 }
 .photo-grid__cell--focused::after {
-  box-shadow: inset 0 0 0 2px var(--accent-muted);
+  box-shadow: inset 0 0 0 2px oklch(var(--p) / 0.6);
 }
 .photo-grid__cell--selected::after {
-  box-shadow: inset 0 0 0 2px var(--accent);
-}
-.photo-grid__cell--selected {
-  z-index: 3;
-}
-.photo-grid__cell--selected::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: var(--accent-wash);
-  pointer-events: none;
-  z-index: 1;
-}
-
-.photo-grid__thumb {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.photo-grid__marquee {
-  position: absolute;
-  pointer-events: none;
-  background: var(--accent-wash);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-xs);
+  box-shadow: inset 0 0 0 2px oklch(var(--p) / 1);
 }
 </style>

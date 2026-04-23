@@ -452,3 +452,35 @@ func TestLibrary_RenamePhoto_MarksIndicesDirty(t *testing.T) {
 		t.Fatalf("RenamePhoto must mark indices dirty")
 	}
 }
+
+func TestLibrary_UntaggedByFolder(t *testing.T) {
+	lib := New()
+	lib.AddPhoto(&Photo{Path: "/root/a/two.jpg", Name: "two.jpg"})
+	lib.AddPhoto(&Photo{Path: "/root/a/one.jpg", Name: "one.jpg"})
+	lib.AddPhoto(&Photo{Path: "/root/b/three.jpg", Name: "three.jpg"})
+	lib.AddPhoto(&Photo{Path: "/root/a/tagged.jpg", Name: "tagged.jpg", Tags: []string{"holiday"}})
+	// AutoTags alone must not exclude a photo from the untagged view.
+	lib.AddPhoto(&Photo{Path: "/root/b/auto.jpg", Name: "auto.jpg", AutoTags: []string{"camera:canon"}})
+
+	buckets := lib.UntaggedByFolder()
+	if len(buckets) != 2 {
+		t.Fatalf("UntaggedByFolder returned %d buckets, want 2", len(buckets))
+	}
+	if buckets[0].Folder != "/root/a" || buckets[1].Folder != "/root/b" {
+		t.Fatalf("folders not sorted ascending: %+v", []string{buckets[0].Folder, buckets[1].Folder})
+	}
+
+	wantA := []string{"one.jpg", "two.jpg"}
+	if len(buckets[0].Photos) != len(wantA) {
+		t.Fatalf("bucket[a] has %d photos, want %d", len(buckets[0].Photos), len(wantA))
+	}
+	for i, want := range wantA {
+		if buckets[0].Photos[i].Name != want {
+			t.Fatalf("bucket[a].Photos[%d].Name = %q, want %q", i, buckets[0].Photos[i].Name, want)
+		}
+	}
+
+	if len(buckets[1].Photos) != 2 {
+		t.Fatalf("bucket[b] should contain auto-tagged and plain photo, got %d", len(buckets[1].Photos))
+	}
+}

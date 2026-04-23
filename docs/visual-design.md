@@ -1,5 +1,9 @@
 # 🎨 Visual Design — Kestrel
 
+> **OBSOLETE (2026-04-23).** Kestrel now ships daisyUI v5 on top of Tailwind v4. The bespoke neo-skeuomorphic token system described below has been removed; theming is whichever daisyUI built-in theme the user selects via the in-app `ThemeController`. See `frontend/src/shell/app.css` for the enabled theme list. The rest of this file is kept as historical reference only and must not be used to guide new work.
+
+---
+
 > This document defines the visual language for Kestrel's frontend: design tokens, the tactile elevation system, per-component specs, and implementation rules.
 > It complements [`ui-design.md`](ui-design.md) (which owns architecture, transport, and component hierarchy) and is referenced by [`CLAUDE.md`](../CLAUDE.md) and [`.github/copilot-instructions.md`](../.github/copilot-instructions.md).
 

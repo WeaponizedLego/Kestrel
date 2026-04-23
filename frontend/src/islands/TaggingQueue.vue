@@ -1,43 +1,26 @@
 <script setup lang="ts">
-// TaggingQueue is a cluster-first tagging surface for visually-similar
-// photos: instead of tagging one photo at a time, the user tags a
-// whole cluster in one action. Largest still-untagged clusters surface
-// first so each click covers the most photos.
-//
-// Scope is fixed to "similar" here on purpose — duplicates belong to
-// the Duplicates island (see Duplicates.vue), where the intended
-// action is dedup, not tagging.
-//
-// The island mounts on page load but stays hidden until the Toolbar
-// fires the open event — keeping the cold cost to the progress HUD
-// fetch that never happens unless the user opens the panel.
-
-import { onMounted, onUnmounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed, reactive } from 'vue'
 import { apiGet, apiPost, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc } from '../transport/thumbs'
 import { onOpenTaggingQueue } from '../transport/tagging'
 import TagInput from '../components/TagInput.vue'
-import type { TagCluster, TaggingProgress } from '../types'
+import type { TaggingProgress, UntaggedFolder } from '../types'
 
 const open = ref(false)
-const clusters = ref<TagCluster[]>([])
+const folders = ref<UntaggedFolder[]>([])
 const progress = ref<TaggingProgress | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
-const selectedId = ref<string | null>(null)
+
+const collapsed = reactive(new Map<string, boolean>())
+const selected = reactive(new Set<string>())
+
 const pendingTags = ref<string[]>([])
 const applying = ref(false)
 
-// Only clusters with work left to do belong in the queue. A cluster
-// whose Untagged count has dropped to zero is already handled and
-// would just be visual noise the user has to scroll past.
-const untaggedClusters = computed(() =>
-  clusters.value.filter((c) => c.untagged > 0),
-)
-
-const selectedCluster = computed(() =>
-  untaggedClusters.value.find((c) => c.id === selectedId.value) ?? null,
+const totalUntaggedShown = computed(() =>
+  folders.value.reduce((sum, f) => sum + f.count, 0),
 )
 
 const progressPct = computed(() => {
@@ -46,22 +29,19 @@ const progressPct = computed(() => {
   return Math.round((p.tagged / p.total) * 100)
 })
 
-async function refreshClusters(): Promise<void> {
+async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [list, prog] = await Promise.all([
-      apiGet<{ clusters: TagCluster[] }>('/api/clusters?kind=similar'),
+    const [u, prog] = await Promise.all([
+      apiGet<{ folders: UntaggedFolder[]; total: number }>('/api/untagged'),
       apiGet<TaggingProgress>('/api/tagging/progress'),
     ])
-    clusters.value = list.clusters ?? []
+    folders.value = u.folders ?? []
     progress.value = prog
-    const visible = untaggedClusters.value
-    if (visible.length > 0 && !visible.some((c) => c.id === selectedId.value)) {
-      selectedId.value = visible[0].id
-    } else if (visible.length === 0) {
-      selectedId.value = null
-    }
+    const alive = new Set<string>()
+    for (const f of folders.value) for (const p of f.photos) alive.add(p.path)
+    for (const path of [...selected]) if (!alive.has(path)) selected.delete(path)
   } catch (err) {
     error.value = friendlyError(err)
   } finally {
@@ -69,29 +49,45 @@ async function refreshClusters(): Promise<void> {
   }
 }
 
-function selectCluster(id: string): void {
-  selectedId.value = id
+function toggleCollapsed(folder: string): void { collapsed.set(folder, !collapsed.get(folder)) }
+function isCollapsed(folder: string): boolean { return collapsed.get(folder) === true }
+
+function togglePhoto(path: string): void {
+  if (selected.has(path)) selected.delete(path)
+  else selected.add(path)
+}
+
+function selectAllInFolder(folder: UntaggedFolder): void {
+  const allSelected = folder.photos.every((p) => selected.has(p.path))
+  if (allSelected) for (const p of folder.photos) selected.delete(p.path)
+  else for (const p of folder.photos) selected.add(p.path)
+}
+
+function folderSelectionState(folder: UntaggedFolder): 'none' | 'some' | 'all' {
+  let count = 0
+  for (const p of folder.photos) if (selected.has(p.path)) count++
+  if (count === 0) return 'none'
+  if (count === folder.photos.length) return 'all'
+  return 'some'
 }
 
 async function applyTags(): Promise<void> {
-  const cluster = selectedCluster.value
   const tags = pendingTags.value
-  if (!cluster || tags.length === 0 || applying.value) return
+  if (tags.length === 0 || selected.size === 0 || applying.value) return
   applying.value = true
   error.value = null
+  const members = [...selected]
   try {
-    await apiPost<{ updated: number }>('/api/tagging/apply', {
-      clusterId: cluster.id,
-      members: cluster.members,
-      tags,
-    })
+    await apiPost<{ updated: number }>('/api/tagging/apply', { members, tags })
     pendingTags.value = []
-    // Optimistic local update; the refresh right after pulls the
-    // authoritative state and advanceToNext picks the next cluster.
-    cluster.untagged = 0
-    const handledId = cluster.id
-    await refreshClusters()
-    advanceToNext(handledId)
+    for (const p of members) selected.delete(p)
+    const tagged = new Set(members)
+    folders.value = folders.value
+      .map((f) => {
+        const photos = f.photos.filter((p) => !tagged.has(p.path))
+        return { ...f, photos, count: photos.length }
+      })
+      .filter((f) => f.photos.length > 0)
   } catch (err) {
     error.value = friendlyError(err)
   } finally {
@@ -99,383 +95,139 @@ async function applyTags(): Promise<void> {
   }
 }
 
-function advanceToNext(handledId: string): void {
-  const list = untaggedClusters.value
-  if (list.length === 0) {
-    selectedId.value = null
-    return
-  }
-  const idx = list.findIndex((c) => c.id === handledId)
-  const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : list[0]
-  selectedId.value = next.id
-}
-
-function close(): void {
-  open.value = false
-}
+function clearSelection(): void { selected.clear() }
+function close(): void { open.value = false }
 
 function onKey(e: KeyboardEvent): void {
   if (!open.value) return
-  if (e.key === 'Escape') {
-    close()
-    return
-  }
-  const tag = (e.target as HTMLElement)?.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return
-  if (e.key === 'j') {
-    stepSelection(1)
-    e.preventDefault()
-  } else if (e.key === 'k') {
-    stepSelection(-1)
-    e.preventDefault()
-  }
-}
-
-function stepSelection(delta: number): void {
-  const list = untaggedClusters.value
-  if (list.length === 0) return
-  const idx = list.findIndex((c) => c.id === selectedId.value)
-  const nextIdx = Math.max(0, Math.min(list.length - 1, idx + delta))
-  selectedId.value = list[nextIdx]?.id ?? null
+  if (e.key === 'Escape') close()
 }
 
 let disposeOpen: (() => void) | null = null
-let disposeClusters: (() => void) | null = null
 let disposeLibrary: (() => void) | null = null
 
 onMounted(() => {
   disposeOpen = onOpenTaggingQueue(async () => {
     open.value = true
-    await refreshClusters()
+    await refresh()
   })
-  disposeClusters = onEvent('clusters:ready', () => {
-    if (open.value) refreshClusters()
-  })
-  disposeLibrary = onEvent('library:updated', () => {
-    if (open.value) refreshClusters()
-  })
+  disposeLibrary = onEvent('library:updated', () => { if (open.value) refresh() })
   window.addEventListener('keydown', onKey)
 })
 
 onUnmounted(() => {
   disposeOpen?.()
-  disposeClusters?.()
   disposeLibrary?.()
   window.removeEventListener('keydown', onKey)
 })
 </script>
 
 <template>
-  <div v-if="open" class="tq" role="dialog" aria-label="Tagging Queue">
-    <div class="tq__backdrop" @click="close" />
+  <div v-if="open" class="modal modal-open" role="dialog" aria-label="Tagging Queue">
+    <div class="modal-box flex flex-col p-0 w-full max-w-6xl max-h-[92vh]">
+      <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+        <h2 class="m-0 text-lg font-semibold">Tagging Queue</h2>
+        <button type="button" class="btn btn-ghost btn-sm btn-square ml-auto" @click="close" aria-label="Close">✕</button>
+      </div>
 
-    <section class="tq__panel">
-      <header class="tq__header">
-        <h2 class="tq__title">Tagging Queue</h2>
-        <button class="tq__close" @click="close" aria-label="Close">×</button>
-      </header>
-
-      <p class="tq__help">
-        Visually similar shots — same subject, scene, or framing.
-        Skim the preview before tagging so a mislabelled group doesn't
-        slip through. Clusters disappear once fully tagged.
+      <p class="border-b border-base-300 px-4 py-2 text-xs text-base-content/70">
+        Photos with no tags yet, grouped by folder. Select photos in a folder and apply one or more tags — work through a trip or shoot in one pass.
       </p>
 
-      <div v-if="progress" class="tq__progress">
-        <div class="tq__progress-bar">
-          <div class="tq__progress-fill" :style="{ width: progressPct + '%' }"></div>
-        </div>
-        <div class="tq__progress-label">
+      <div v-if="progress" class="flex flex-col gap-1 border-b border-base-300 px-4 py-2">
+        <progress class="progress progress-primary h-1.5" :value="progressPct" max="100" />
+        <div class="text-xs tabular-nums text-base-content/70">
           <strong>{{ progress.tagged.toLocaleString() }}</strong>
           /
           {{ progress.total.toLocaleString() }} tagged
-          <span class="tq__progress-sep">·</span>
-          {{ untaggedClusters.length }} clusters left
+          <span class="mx-1 text-base-content/40">·</span>
+          {{ totalUntaggedShown.toLocaleString() }} untagged across
+          {{ folders.length }} folder{{ folders.length === 1 ? '' : 's' }}
         </div>
       </div>
 
-      <div v-if="error" class="tq__error">{{ error }}</div>
+      <div v-if="error" class="alert alert-error alert-soft rounded-none text-xs" role="alert">{{ error }}</div>
 
-      <div class="tq__body">
-        <aside class="tq__list">
-          <div v-if="loading && untaggedClusters.length === 0" class="tq__empty">
-            Loading clusters…
-          </div>
-          <div v-else-if="!loading && untaggedClusters.length === 0" class="tq__empty">
-            No untagged clusters left. Run a scan, or everything's already handled.
-          </div>
-          <ul v-else class="tq__clusters">
-            <li
-              v-for="c in untaggedClusters"
-              :key="c.id"
-              :class="['tq__cluster', { 'tq__cluster--active': c.id === selectedId }]"
-              @click="selectCluster(c.id)"
+      <div class="flex-1 min-h-0 overflow-y-auto">
+        <div v-if="loading && folders.length === 0" class="p-4 text-sm text-base-content/60">Loading untagged photos…</div>
+        <div v-else-if="!loading && folders.length === 0" class="p-4 text-sm text-base-content/60">Everything is tagged. Nice.</div>
+        <ul v-else class="divide-y divide-base-300">
+          <li v-for="f in folders" :key="f.folder">
+            <div
+              class="flex cursor-pointer items-center gap-2 px-4 py-2 hover:bg-base-200 select-none"
+              @click="toggleCollapsed(f.folder)"
             >
-              <img class="tq__thumb" :src="thumbSrc(c.members[0])" alt="" />
-              <div class="tq__cluster-meta">
-                <div class="tq__cluster-size">{{ c.size }} photos</div>
-                <div class="tq__cluster-state">
-                  {{ c.untagged }} untagged
-                </div>
-              </div>
-            </li>
-          </ul>
-        </aside>
-
-        <main class="tq__detail">
-          <div v-if="!selectedCluster" class="tq__empty">
-            Select a cluster on the left to tag it.
-          </div>
-          <template v-else>
-            <div class="tq__detail-header">
-              <h3>Cluster · {{ selectedCluster.size }} photos</h3>
-              <p class="tq__detail-sub">
-                {{ selectedCluster.untagged }} currently untagged
-              </p>
-            </div>
-            <div class="tq__grid">
-              <img
-                v-for="p in selectedCluster.members.slice(0, 24)"
-                :key="p"
-                class="tq__grid-img"
-                :src="thumbSrc(p)"
-                alt=""
-              />
-            </div>
-            <div v-if="selectedCluster.members.length > 24" class="tq__more">
-              + {{ selectedCluster.members.length - 24 }} more
-            </div>
-            <footer class="tq__apply">
-              <TagInput
-                v-model="pendingTags"
-                placeholder="Type a tag, press space to add"
-                aria-label="Tags to apply"
-                class="tq__tag-input"
-              />
+              <span
+                class="text-base-content/50 text-xs transition-transform w-3"
+                :style="{ transform: !isCollapsed(f.folder) ? 'rotate(90deg)' : 'none' }"
+              >▸</span>
+              <span class="flex-1 truncate font-mono text-xs" :title="f.folder">{{ f.folder }}</span>
+              <span class="badge badge-ghost badge-sm tabular-nums">{{ f.count }}</span>
               <button
-                class="tq__apply-btn"
-                :disabled="applying || pendingTags.length === 0"
-                @click="applyTags"
+                type="button"
+                :class="[
+                  'btn btn-xs',
+                  folderSelectionState(f) === 'all' ? 'btn-primary' :
+                  folderSelectionState(f) === 'some' ? 'btn-outline btn-primary' : 'btn-ghost',
+                ]"
+                @click.stop="selectAllInFolder(f)"
               >
-                {{ applying ? 'Applying…' : 'Tag cluster' }}
+                {{ folderSelectionState(f) === 'all' ? 'Clear' : 'Select all' }}
               </button>
-            </footer>
-          </template>
-        </main>
+            </div>
+            <div
+              v-if="!isCollapsed(f.folder)"
+              class="grid gap-1 px-4 pb-3"
+              style="grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));"
+            >
+              <button
+                v-for="p in f.photos"
+                :key="p.path"
+                type="button"
+                :class="[
+                  'relative aspect-square overflow-hidden rounded border-2 p-0 bg-base-300',
+                  selected.has(p.path) ? 'border-primary' : 'border-transparent hover:border-base-content/30',
+                ]"
+                @click="togglePhoto(p.path)"
+                :title="p.name"
+              >
+                <img class="h-full w-full object-cover" :src="thumbSrc(p.path)" alt="" />
+                <span
+                  v-if="selected.has(p.path)"
+                  class="badge badge-primary badge-sm absolute right-1 top-1"
+                  aria-hidden="true"
+                >✓</span>
+              </button>
+            </div>
+          </li>
+        </ul>
       </div>
-    </section>
+
+      <div v-if="folders.length > 0" class="flex items-center gap-3 border-t border-base-300 px-4 py-3">
+        <div class="flex items-center gap-1 text-sm tabular-nums min-w-28">
+          <strong>{{ selected.size }}</strong> selected
+          <button
+            v-if="selected.size > 0"
+            type="button"
+            class="btn btn-xs btn-ghost"
+            @click="clearSelection"
+          >Clear</button>
+        </div>
+        <TagInput
+          v-model="pendingTags"
+          placeholder="Type a tag, press space to add"
+          aria-label="Tags to apply"
+          class="flex-1"
+        />
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          :disabled="applying || pendingTags.length === 0 || selected.size === 0"
+          @click="applyTags"
+        >
+          {{ applying ? 'Applying…' : `Apply to ${selected.size || 0}` }}
+        </button>
+      </div>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.tq {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-}
-.tq__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(3px);
-}
-.tq__panel {
-  position: relative;
-  width: min(1080px, 92vw);
-  margin: 4vh auto;
-  background: var(--surface-bg);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-3, 10px);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.tq__header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.tq__title {
-  margin: 0;
-  font-size: var(--fs-medium);
-  font-weight: var(--fw-semibold);
-  color: var(--text-primary);
-}
-.tq__close {
-  margin-left: auto;
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 24px;
-  line-height: 1;
-  cursor: pointer;
-}
-.tq__help {
-  margin: 0;
-  padding: var(--space-3) var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: var(--fs-small);
-  line-height: 1.5;
-}
-.tq__progress {
-  padding: var(--space-3) var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.tq__progress-bar {
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--surface-active);
-  overflow: hidden;
-}
-.tq__progress-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width var(--dur-medium, 200ms) var(--ease-out);
-}
-.tq__progress-label {
-  font-size: var(--fs-small);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-.tq__progress-sep {
-  margin: 0 var(--space-2);
-  color: var(--text-muted);
-}
-.tq__error {
-  padding: var(--space-3) var(--space-5);
-  background: rgba(255, 70, 70, 0.1);
-  color: #ff8080;
-  font-size: var(--fs-small);
-}
-.tq__body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  min-height: 0;
-}
-.tq__list {
-  border-right: 1px solid var(--border-subtle);
-  overflow-y: auto;
-}
-.tq__clusters {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.tq__cluster {
-  display: flex;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  cursor: pointer;
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background var(--dur-fast) var(--ease-out);
-}
-.tq__cluster:hover {
-  background: var(--surface-active);
-}
-.tq__cluster--active {
-  background: var(--surface-active);
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-.tq__thumb {
-  width: 48px;
-  height: 48px;
-  object-fit: cover;
-  border-radius: var(--radius-2, 4px);
-  background: var(--surface-active);
-}
-.tq__cluster-meta {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-.tq__cluster-size {
-  color: var(--text-primary);
-  font-size: var(--fs-small);
-  font-weight: var(--fw-medium);
-}
-.tq__cluster-state {
-  color: var(--text-muted);
-  font-size: var(--fs-micro);
-}
-.tq__detail {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.tq__detail-header {
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.tq__detail-header h3 {
-  margin: 0 0 var(--space-1) 0;
-  font-size: var(--fs-medium);
-  color: var(--text-primary);
-}
-.tq__detail-sub {
-  margin: 0;
-  font-size: var(--fs-small);
-  color: var(--text-muted);
-}
-.tq__grid {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-4) var(--space-5);
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: var(--space-2);
-}
-.tq__grid-img {
-  width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
-  border-radius: var(--radius-2, 4px);
-  background: var(--surface-active);
-}
-.tq__more {
-  padding: 0 var(--space-5) var(--space-3);
-  font-size: var(--fs-small);
-  color: var(--text-muted);
-}
-.tq__apply {
-  display: flex;
-  gap: var(--space-3);
-  padding: var(--space-4) var(--space-5);
-  border-top: 1px solid var(--border-subtle);
-}
-.tq__tag-input {
-  flex: 1;
-  min-width: 0;
-}
-.tq__apply-btn {
-  height: 32px;
-  padding: 0 var(--space-4);
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius-2, 6px);
-  color: var(--text-primary);
-  font-size: var(--fs-small);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-}
-.tq__apply-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.tq__empty {
-  padding: var(--space-5);
-  color: var(--text-muted);
-  font-size: var(--fs-small);
-}
-</style>
