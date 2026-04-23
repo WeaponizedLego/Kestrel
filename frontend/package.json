@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
+    "predev": "pnpm run render-shell",
     "render-shell": "tsx scripts/render-shell.ts",
     "build": "pnpm run render-shell && vue-tsc --noEmit && vite build",
     "preview": "vite preview"
