@@ -312,6 +312,51 @@ func (l *Library) RemovePhotosInFolder(folder string) []string {
 	return removed
 }
 
+// FolderBucket groups untagged photos by their parent directory.
+// Photos carry value copies so the Library mutex is released before the
+// caller serializes them. Folders sort ascending by path; photos within
+// a folder sort ascending by Name.
+type FolderBucket struct {
+	Folder string
+	Photos []Photo
+}
+
+// UntaggedByFolder returns every photo with no user tags, grouped by
+// filepath.Dir(Path). AutoTags are intentionally ignored — matching the
+// cluster.Progress definition of "untagged". Use this to feed an
+// onboarding / catch-up tagging view that mirrors the on-disk layout.
+func (l *Library) UntaggedByFolder() []FolderBucket {
+	l.mu.RLock()
+	buckets := make(map[string][]Photo)
+	for _, p := range l.photos {
+		if len(p.Tags) > 0 {
+			continue
+		}
+		folder := filepath.Dir(p.Path)
+		buckets[folder] = append(buckets[folder], *p)
+	}
+	l.mu.RUnlock()
+
+	folders := make([]string, 0, len(buckets))
+	for f := range buckets {
+		folders = append(folders, f)
+	}
+	sort.Strings(folders)
+
+	out := make([]FolderBucket, 0, len(folders))
+	for _, f := range folders {
+		photos := buckets[f]
+		sort.SliceStable(photos, func(i, j int) bool {
+			if photos[i].Name != photos[j].Name {
+				return photos[i].Name < photos[j].Name
+			}
+			return photos[i].Path < photos[j].Path
+		})
+		out = append(out, FolderBucket{Folder: f, Photos: photos})
+	}
+	return out
+}
+
 // TagStat describes one tag and how many photos currently carry it.
 // Only user tags (Photo.Tags) are counted; AutoTags are derived on
 // every scan and shouldn't be shown as editable vocabulary.

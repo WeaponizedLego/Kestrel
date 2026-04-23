@@ -34,6 +34,63 @@ func (h *TaggingHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/clusters", h.listClusters)
 	mux.HandleFunc("/tagging/apply", h.apply)
 	mux.HandleFunc("/tagging/progress", h.progress)
+	mux.HandleFunc("/untagged", h.untaggedByFolder)
+}
+
+// untaggedPhotoDTO is the per-photo wire shape for GET /api/untagged.
+// Hash drives the thumbnail URL on the frontend; callers that don't
+// need dimensions (e.g. a count-only UI) can ignore them.
+type untaggedPhotoDTO struct {
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	Hash      string `json:"hash"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+// untaggedFolderDTO is a folder bucket for GET /api/untagged.
+type untaggedFolderDTO struct {
+	Folder string             `json:"folder"`
+	Count  int                `json:"count"`
+	Photos []untaggedPhotoDTO `json:"photos"`
+}
+
+// untaggedByFolder responds to GET /api/untagged with photos that have
+// no user tags, grouped by parent directory. Powers the repurposed
+// Tagging Queue island, which browses a fresh library folder-by-folder
+// rather than by pHash similarity.
+func (h *TaggingHandler) untaggedByFolder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
+		return
+	}
+	buckets := h.lib.UntaggedByFolder()
+	folders := make([]untaggedFolderDTO, 0, len(buckets))
+	total := 0
+	for _, b := range buckets {
+		photos := make([]untaggedPhotoDTO, 0, len(b.Photos))
+		for _, p := range b.Photos {
+			photos = append(photos, untaggedPhotoDTO{
+				Path:      p.Path,
+				Name:      p.Name,
+				Width:     p.Width,
+				Height:    p.Height,
+				Hash:      p.Hash,
+				SizeBytes: p.SizeBytes,
+			})
+		}
+		total += len(photos)
+		folders = append(folders, untaggedFolderDTO{
+			Folder: b.Folder,
+			Count:  len(photos),
+			Photos: photos,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"folders": folders,
+		"total":   total,
+	})
 }
 
 // listClusters responds to GET /api/clusters?kind=duplicate|similar.

@@ -2,10 +2,6 @@
 // up as its HTML entry, processes the per-island <script type="module">
 // tags, hashes the bundles, and writes the final dist/index.html.
 //
-// The shell is a static render-function component (src/shell/Shell.ts);
-// renderToString from @vue/server-renderer turns it into HTML once, so
-// the browser never re-creates the shell DOM at runtime.
-//
 // The <!--KESTREL_TOKEN_META--> placeholder is preserved literally so
 // the Go server can substitute the real per-run token at request time
 // (see internal/server/assets.go).
@@ -15,21 +11,23 @@ import { fileURLToPath, URL } from 'node:url'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
-import { Shell, shellStyles } from '../src/shell/Shell'
+import { Shell } from '../src/shell/Shell'
 
-// PhotoViewer is no longer a top-level island: PhotoGrid loads it on
-// demand via a dynamic import (see Phase 8 in TASKS.md). Keeping it
-// out of the shell skips the extra HTTP request on first paint.
 const islandEntries = [
   '/src/islands/Sidebar.entry.ts',
   '/src/islands/Toolbar.entry.ts',
   '/src/islands/PhotoGrid.entry.ts',
   '/src/islands/StatusBar.entry.ts',
   '/src/islands/TaggingQueue.entry.ts',
-  '/src/islands/Duplicates.entry.ts',
+  '/src/islands/SimilarityReview.entry.ts',
   '/src/islands/TagManager.entry.ts',
   '/src/islands/FileOps.entry.ts',
 ]
+
+// Runs in <head> before any island bootstraps so daisyUI's data-theme
+// is applied before first paint — prevents a flash of the default
+// theme when the user has picked another one.
+const themeBootstrap = `(function(){try{var t=localStorage.getItem('kestrel-theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}})();`
 
 async function main() {
   const shellMarkup = await renderToString(createSSRApp(Shell))
@@ -39,16 +37,14 @@ async function main() {
     .join('\n')
 
   const html = `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
     <title>Kestrel</title>
     <!--KESTREL_TOKEN_META-->
-    <link rel="stylesheet" href="/src/shell/tokens.css" />
-    <link rel="stylesheet" href="/src/shell/base.css" />
-    <style>${shellStyles}</style>
+    <script>${themeBootstrap}</script>
+    <link rel="stylesheet" href="/src/shell/app.css" />
   </head>
   <body>
     ${shellMarkup}

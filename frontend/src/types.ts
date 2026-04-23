@@ -54,3 +54,22 @@ export interface TaggingProgress {
   untagged: number
   largestUntaggedSize: number
 }
+
+// UntaggedPhoto mirrors api.untaggedPhotoDTO. Hash drives the
+// thumbnail URL; width/height are hints for layout.
+export interface UntaggedPhoto {
+  path: string
+  name: string
+  width: number
+  height: number
+  hash: string
+  sizeBytes: number
+}
+
+// UntaggedFolder groups UntaggedPhotos by their parent directory.
+// Feeds the folder-browser Tagging Queue island.
+export interface UntaggedFolder {
+  folder: string
+  count: number
+  photos: UntaggedPhoto[]
+}

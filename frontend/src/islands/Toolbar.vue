@@ -7,7 +7,7 @@ import {
   selectedPaths,
 } from '../transport/selection'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { openTaggingQueue, openDuplicates, openTagManager } from '../transport/tagging'
+import { openTaggingQueue, openSimilarityReview, openTagManager } from '../transport/tagging'
 import {
   apiUndoDepth,
   requestDelete,
@@ -15,20 +15,11 @@ import {
   requestUndo,
 } from '../transport/fileops'
 import { onEvent } from '../transport/events'
-
-const fillPct = computed(() => {
-  const range = CELL_SIZE_MAX - CELL_SIZE_MIN
-  return range > 0
-    ? ((cellSize.value - CELL_SIZE_MIN) / range) * 100
-    : 0
-})
+import ThemeController from '../components/ThemeController.vue'
 
 const hasSelection = computed(() => selectedPaths.value.size > 0)
 const selectionLabel = computed(() => `${selectedPaths.value.size} selected`)
 
-// Undo depth is polled from the server rather than tracked locally so
-// restarts and concurrent clients stay in sync. Refreshed on mount +
-// whenever a fileops:done or fileops:undone event fires.
 const undoDepth = ref(0)
 async function refreshUndoDepth() {
   try {
@@ -67,264 +58,87 @@ function onUndo() {
 </script>
 
 <template>
-  <div class="toolbar">
-    <span v-if="hasSelection" class="toolbar__selection" aria-live="polite">
+  <div class="flex w-full items-center justify-end gap-2">
+    <span
+      v-if="hasSelection"
+      class="badge badge-primary badge-sm font-mono"
+      aria-live="polite"
+    >
       {{ selectionLabel }}
     </span>
-    <button
-      class="toolbar__action"
-      type="button"
-      :disabled="!hasSelection"
-      @click="onMove"
-      title="Move selected photos to a folder"
-    >
-      <span class="toolbar__action-dot" aria-hidden="true"></span>
-      Move
-    </button>
-    <button
-      class="toolbar__action toolbar__action--danger"
-      type="button"
-      :disabled="!hasSelection"
-      @click="onDelete"
-      title="Delete selected photos"
-    >
-      <span class="toolbar__action-dot toolbar__action-dot--warn" aria-hidden="true"></span>
-      Delete
-    </button>
-    <button
-      class="toolbar__action"
-      type="button"
-      :disabled="undoDepth === 0"
-      @click="onUndo"
-      :title="undoDepth > 0 ? `Undo last operation (${undoDepth} undoable)` : 'Nothing to undo'"
-    >
-      <span class="toolbar__action-dot" aria-hidden="true"></span>
-      Undo
-    </button>
-    <button
-      class="toolbar__action"
-      type="button"
-      @click="openDuplicates"
-      title="Review near-identical duplicates"
-    >
-      <span class="toolbar__action-dot toolbar__action-dot--warn" aria-hidden="true"></span>
-      Duplicates
-    </button>
-    <button
-      class="toolbar__action"
-      type="button"
-      @click="openTaggingQueue"
-      title="Tag whole clusters of visually similar photos at once"
-    >
-      <span class="toolbar__action-dot" aria-hidden="true"></span>
-      Tag queue
-    </button>
-    <button
-      class="toolbar__action"
-      type="button"
-      @click="openTagManager"
-      title="Rename, merge, or delete tags"
-    >
-      <span class="toolbar__action-dot" aria-hidden="true"></span>
-      Manage tags
-    </button>
-    <label class="toolbar__size">
-      <span class="toolbar__label">Size</span>
-      <span
-        class="toolbar__slider-wrap"
-        :style="{ '--fill-pct': fillPct + '%' }"
+
+    <div class="join">
+      <button
+        class="btn btn-sm btn-ghost join-item"
+        type="button"
+        :disabled="!hasSelection"
+        @click="onMove"
+        title="Move selected photos to a folder"
       >
-        <input
-          class="toolbar__slider"
-          type="range"
-          :min="CELL_SIZE_MIN"
-          :max="CELL_SIZE_MAX"
-          :step="CELL_SIZE_STEP"
-          v-model.number="cellSize"
-          aria-label="Thumbnail size"
-        />
-      </span>
-      <span class="toolbar__value">{{ cellSize }}<span class="toolbar__unit">px</span></span>
+        Move
+      </button>
+      <button
+        class="btn btn-sm btn-ghost join-item text-error"
+        type="button"
+        :disabled="!hasSelection"
+        @click="onDelete"
+        title="Delete selected photos"
+      >
+        Delete
+      </button>
+      <button
+        class="btn btn-sm btn-ghost join-item"
+        type="button"
+        :disabled="undoDepth === 0"
+        @click="onUndo"
+        :title="undoDepth > 0 ? `Undo last operation (${undoDepth} undoable)` : 'Nothing to undo'"
+      >
+        Undo
+        <span v-if="undoDepth > 0" class="badge badge-ghost badge-xs">{{ undoDepth }}</span>
+      </button>
+    </div>
+
+    <div class="join">
+      <button
+        class="btn btn-sm join-item"
+        type="button"
+        @click="() => openSimilarityReview()"
+        title="Review near-identical duplicates and visually similar photos"
+      >
+        Similar
+      </button>
+      <button
+        class="btn btn-sm join-item"
+        type="button"
+        @click="openTaggingQueue"
+        title="Tag photos that have no tags yet, grouped by folder"
+      >
+        Tag queue
+      </button>
+      <button
+        class="btn btn-sm join-item"
+        type="button"
+        @click="openTagManager"
+        title="Rename, merge, or delete tags"
+      >
+        Manage
+      </button>
+    </div>
+
+    <label class="flex items-center gap-2">
+      <span class="text-xs uppercase tracking-wider text-base-content/60">Size</span>
+      <input
+        class="range range-xs range-primary w-40"
+        type="range"
+        :min="CELL_SIZE_MIN"
+        :max="CELL_SIZE_MAX"
+        :step="CELL_SIZE_STEP"
+        v-model.number="cellSize"
+        aria-label="Thumbnail size"
+      />
+      <span class="font-mono text-xs tabular-nums w-10 text-right">{{ cellSize }}px</span>
     </label>
+
+    <ThemeController />
   </div>
 </template>
-
-<style scoped>
-.toolbar {
-  width: 100%;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-5);
-}
-
-.toolbar__action {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  height: 26px;
-  padding: 0 var(--space-4);
-  background: var(--surface-raised, rgba(255,255,255,0.04));
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2, 6px);
-  color: var(--text-primary);
-  font-size: var(--fs-small);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out);
-}
-.toolbar__action:hover:not(:disabled) {
-  background: var(--surface-active);
-  border-color: var(--border-strong, var(--border-subtle));
-}
-.toolbar__action:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-glow);
-}
-.toolbar__action:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.toolbar__action--danger:not(:disabled):hover {
-  border-color: var(--danger, #d94f4f);
-  color: var(--danger, #d94f4f);
-}
-.toolbar__selection {
-  font: var(--fw-medium) var(--fs-caption) / 1 var(--font-mono);
-  color: var(--accent);
-  letter-spacing: var(--tracking-tight);
-  padding: 0 var(--space-2);
-}
-.toolbar__action-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
-}
-.toolbar__action-dot--warn {
-  background: var(--warn, #ffb547);
-  box-shadow: 0 0 6px rgba(255, 181, 71, 0.5);
-}
-
-.toolbar__size {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  height: 26px;
-  padding: 0 var(--space-4);
-  font-size: var(--fs-small);
-}
-
-.toolbar__label {
-  font-size: var(--fs-micro);
-  font-weight: var(--fw-semibold);
-  letter-spacing: var(--tracking-micro);
-  text-transform: uppercase;
-  color: var(--text-muted);
-  user-select: none;
-}
-
-.toolbar__slider-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  width: 160px;
-  height: 14px;
-}
-.toolbar__slider-wrap::before,
-.toolbar__slider-wrap::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  height: 3px;
-  border-radius: var(--radius-full);
-  pointer-events: none;
-}
-.toolbar__slider-wrap::before {
-  background: var(--surface-active);
-}
-.toolbar__slider-wrap::after {
-  right: auto;
-  width: var(--fill-pct, 0%);
-  background: var(--accent);
-}
-
-.toolbar__slider {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  height: 14px;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-}
-.toolbar__slider:focus { outline: none; }
-.toolbar__slider:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 3px var(--accent-glow);
-}
-.toolbar__slider:focus-visible::-moz-range-thumb {
-  box-shadow: 0 0 0 3px var(--accent-glow);
-}
-
-.toolbar__slider::-webkit-slider-runnable-track {
-  height: 14px;
-  background: transparent;
-  border: none;
-}
-.toolbar__slider::-moz-range-track {
-  height: 3px;
-  background: transparent;
-  border: none;
-}
-
-.toolbar__slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: var(--radius-full);
-  background: var(--text-primary);
-  border: none;
-  cursor: grab;
-  margin-top: 1px;
-  transition: transform var(--dur-fast) var(--ease-out),
-              background var(--dur-fast) var(--ease-out);
-}
-.toolbar__slider::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border-radius: var(--radius-full);
-  background: var(--text-primary);
-  border: none;
-  cursor: grab;
-  transition: transform var(--dur-fast) var(--ease-out),
-              background var(--dur-fast) var(--ease-out);
-}
-.toolbar__slider:hover::-webkit-slider-thumb { background: var(--accent); transform: scale(1.1); }
-.toolbar__slider:hover::-moz-range-thumb { background: var(--accent); transform: scale(1.1); }
-.toolbar__slider:active::-webkit-slider-thumb { cursor: grabbing; background: var(--accent); }
-.toolbar__slider:active::-moz-range-thumb { cursor: grabbing; background: var(--accent); }
-
-.toolbar__value {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--fs-small);
-  font-variant-numeric: tabular-nums;
-  min-width: 48px;
-  text-align: right;
-  user-select: none;
-}
-.toolbar__unit {
-  color: var(--text-muted);
-  margin-left: 1px;
-}
-</style>

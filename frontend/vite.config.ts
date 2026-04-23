@@ -1,5 +1,6 @@
 import { defineConfig, type PluginOption } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 
 // The Go server reads its actual port back from the listener, so dev
@@ -34,14 +35,14 @@ const islandEntries = {
   toolbar:      'src/islands/Toolbar.entry.ts',
   photoGrid:    'src/islands/PhotoGrid.entry.ts',
   statusBar:    'src/islands/StatusBar.entry.ts',
-  taggingQueue: 'src/islands/TaggingQueue.entry.ts',
-  duplicates:   'src/islands/Duplicates.entry.ts',
+  taggingQueue:     'src/islands/TaggingQueue.entry.ts',
+  similarityReview: 'src/islands/SimilarityReview.entry.ts',
   tagManager:   'src/islands/TagManager.entry.ts',
   fileOps:      'src/islands/FileOps.entry.ts',
 }
 
 export default defineConfig({
-  plugins: [vue(), injectDevToken()],
+  plugins: [vue(), tailwindcss(), injectDevToken()],
   build: {
     // Vite writes into internal/assets/dist/ so //go:embed picks the
     // output up directly. emptyOutDir clears stale files between builds.
