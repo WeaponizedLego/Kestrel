@@ -32,11 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - uses: actions/setup-go@v5
         with:
@@ -52,8 +56,8 @@ jobs:
           GOOS:
           GOARCH:
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Vet
         # vet only needs to run once, but running per-target catches
@@ -69,11 +73,76 @@ jobs:
             -o "dist/kestrel-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" \
             ./cmd/kestrel
 
+      - name: Package AppImage
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          icon_arg=()
+          if [ -f assets/icon/icon.png ]; then icon_arg=(--icon assets/icon/icon.png); fi
+          ./scripts/package-linux.sh "dist/kestrel-linux-amd64" dist "${icon_arg[@]}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: kestrel-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
+          path: |
+            dist/kestrel-${{ matrix.goos }}-${{ matrix.goarch }}*
+            dist/Kestrel-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  package-macos:
+    name: Package macOS .app (arm64)
+    runs-on: macos-latest
+    env:
+      CGO_ENABLED: 0
+      GOOS: darwin
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          CGO_ENABLED: 1
+          GOOS:
+          GOARCH:
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" \
+            -o "dist/kestrel" \
+            ./cmd/kestrel
+
+      - name: Package .app
+        run: |
+          icon_arg=()
+          if [ -f assets/icon/icon.png ]; then icon_arg=(--icon assets/icon/icon.png); fi
+          ./scripts/package-macos.sh dist/kestrel dist "${icon_arg[@]}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-macos-arm64-app
+          path: dist/Kestrel-macos-arm64.zip
           if-no-files-found: error
           retention-days: 14
 

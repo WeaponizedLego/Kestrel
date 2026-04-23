@@ -37,11 +37,11 @@ The UI shell is **not** a webview framework. The Go binary starts a `net/http` s
 
 ```bash
 # Dev: two processes, Vite proxies /api and /ws to Go
-cd frontend && npm install && npm run dev   # terminal 1
+cd frontend && pnpm install && pnpm dev     # terminal 1
 go run ./cmd/kestrel --dev                  # terminal 2 (skips browser launch, skips embed)
 
 # Production binary
-cd frontend && npm run build                # emits frontend/dist/
+cd frontend && pnpm build                   # emits frontend/dist/
 go build -ldflags="-s -w" -o kestrel ./cmd/kestrel
 ```
 
