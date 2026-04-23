@@ -3,10 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
     "render-shell": "tsx scripts/render-shell.ts",
-    "build": "npm run render-shell && vue-tsc --noEmit && vite build",
+    "build": "pnpm run render-shell && vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

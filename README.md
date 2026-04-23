@@ -13,6 +13,7 @@ Kestrel is a high-performance desktop photo manager built for very large librari
   - [5) Assisted Tagging](#5-assisted-tagging)
 - [Tech Stack](#tech-stack)
 - [Runtime Flow](#runtime-flow)
+- [Install](#install)
 - [Getting Started (Dev)](#getting-started-dev)
 - [Roadmap / Future Work](#roadmap--future-work)
 - [Gitflow CI Enforcement](#gitflow-ci-enforcement)
@@ -117,12 +118,38 @@ The main goal is interaction speed after startup: smooth scrolling, sorting, and
 3. Access original files from HDD/NAS only when opening full-resolution images.
 4. Persist updated state on exit or manual sync to `library.gob`.
 
+## Install
+
+Kestrel ships as a single self-contained download per platform — no Go or Node toolchain required to run it. Builds are produced by the [Build Matrix workflow](.github/workflows/build-matrix.yml) and attached to each green CI run as artifacts.
+
+### macOS (Apple Silicon)
+
+1. Download `kestrel-macos-arm64-app.zip` and unzip it. You'll get `Kestrel.app`.
+2. Drag `Kestrel.app` into `/Applications`.
+3. The first time you launch it, **right-click → Open** (not double-click). macOS will warn that the app is from an unidentified developer; click **Open** anyway. This is a one-time per-install action — subsequent launches double-click normally.
+   - Alternatively, strip the quarantine flag from a terminal: `xattr -dr com.apple.quarantine /Applications/Kestrel.app`.
+4. Launching opens your default browser at a `http://127.0.0.1:<port>/` URL with an auto-generated session token. Closing every Kestrel browser tab quits the app within ~10 seconds.
+
+Builds are unsigned today — see [out-of-scope follow-ups](#roadmap--future-work) for proper notarization.
+
+### Linux (x86_64)
+
+1. Download `Kestrel-x86_64.AppImage` from the workflow artifacts.
+2. `chmod +x Kestrel-x86_64.AppImage`
+3. Double-click in your file manager, or run `./Kestrel-x86_64.AppImage` from a terminal.
+
+The AppImage requires FUSE 2 on the host (preinstalled on most desktop distros).
+
+### Windows
+
+Not packaged yet — the raw `kestrel-windows-amd64.exe` from CI artifacts works but spawns a console window. Tracked as a follow-up.
+
 ## Getting Started (Dev)
 
 ### Prerequisites
 
 - Go toolchain (1.22+)
-- Node.js (22+) and npm
+- Node.js (22+) and pnpm (via Corepack: `corepack enable`)
 
 ### Run in development mode
 
@@ -130,7 +157,7 @@ Dev runs two processes: Vite serves the frontend with HMR, and the Go binary ser
 
 ```bash
 # Terminal 1 — frontend with HMR
-cd frontend && npm install && npm run dev
+cd frontend && pnpm install && pnpm dev
 
 # Terminal 2 — Go backend
 go run ./cmd/kestrel --dev
@@ -141,7 +168,7 @@ In `--dev` mode the Go binary skips opening the browser (you point your own at t
 ### Build the production binary
 
 ```bash
-cd frontend && npm run build   # emits frontend/dist/
+cd frontend && pnpm build   # emits frontend/dist/
 cd ..
 go build -ldflags="-s -w" -o kestrel ./cmd/kestrel
 ```
