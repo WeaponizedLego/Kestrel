@@ -40,6 +40,15 @@ func FileOpsJournalPath() (string, error) {
 	return appDataPath("fileops.journal")
 }
 
+// WatchedRootsPath returns the absolute path of watched_roots.json
+// under the user's config directory. This file is the durable list of
+// folders the background rescanner should keep in sync with disk —
+// small, editable by advanced users, and intentionally kept separate
+// from library_meta.gob so its schema can evolve independently.
+func WatchedRootsPath() (string, error) {
+	return appDataPath("watched_roots.json")
+}
+
 // TrashRootPath returns the absolute path of the Kestrel-managed
 // trash directory. Like library_meta.gob this is user data the app
 // must not silently lose; a future purge/retention job can prune it.

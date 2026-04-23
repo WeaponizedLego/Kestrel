@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
 	"github.com/WeaponizedLego/kestrel/internal/metadata"
@@ -90,6 +91,20 @@ type Options struct {
 	// fresh photo. The zero value is safe: it produces a minimal set
 	// (kind, year, camera, …) without folder tags or geocoding.
 	Autotag autotag.Options
+
+	// Workers caps the number of concurrent file workers. Zero means
+	// runtime.NumCPU() — the historic "full throttle" behaviour. A
+	// low-intensity background rescan sets this to a small fraction
+	// (e.g. NumCPU/4) so the user can keep a game or video call
+	// running without feeling Kestrel in the background.
+	Workers int
+
+	// ThrottleSleep is paused between every file a worker processes.
+	// Zero means no pause — historic full-speed behaviour. A few
+	// milliseconds is enough to cap disk I/O pressure without making
+	// rescans feel glacial. The sleep is ctx-aware so a cancel is
+	// still prompt.
+	ThrottleSleep time.Duration
 }
 
 // Progress is the payload of a "scan:progress" event. Total is -1
@@ -139,7 +154,7 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 
 	var added atomic.Int64
 	var workers sync.WaitGroup
-	for range runtime.NumCPU() {
+	for range workerCount(opts) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -225,6 +240,9 @@ func processPaths(
 			if unchanged(path, lib) {
 				n := added.Add(1)
 				publishProgress(opts, n, root)
+				if !throttle(ctx, opts.ThrottleSleep) {
+					return
+				}
 				continue
 			}
 
@@ -244,7 +262,44 @@ func processPaths(
 
 			n := added.Add(1)
 			publishProgress(opts, n, root)
+			if !throttle(ctx, opts.ThrottleSleep) {
+				return
+			}
 		}
+	}
+}
+
+// workerCount resolves opts.Workers into a usable pool size, clamped
+// to [1, runtime.NumCPU()]. Zero means "default" and maps to NumCPU;
+// negatives and out-of-range values are rounded into the valid band
+// so a misconfigured scheduler can't deadlock the scanner or blow
+// past the hardware.
+func workerCount(opts Options) int {
+	max := runtime.NumCPU()
+	if opts.Workers <= 0 {
+		return max
+	}
+	if opts.Workers > max {
+		return max
+	}
+	return opts.Workers
+}
+
+// throttle sleeps for d (when positive) or returns immediately.
+// Returns false when ctx is cancelled during the sleep so the caller
+// can bail out instead of processing another file. Factored out so
+// the sleep-vs-cancel decision lives in one place.
+func throttle(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

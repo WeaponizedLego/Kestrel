@@ -14,7 +14,16 @@ interface ScanDone {
   added: number
   cancelled: boolean
   error?: string
+  intensity?: ScanIntensity
 }
+
+interface ScanStarted {
+  id: string
+  root: string
+  intensity?: ScanIntensity
+}
+
+type ScanIntensity = 'normal' | 'low'
 
 // baseMessage holds the last event-driven status line (scans, library
 // counts). The resync layer can briefly override it without losing
@@ -39,13 +48,22 @@ const message = computed(() => {
 // finishes successfully, independent of working so CSS cross-fades
 // cleanly.
 const scanRunning = ref(false)
-const working = computed(() => scanRunning.value || resyncing.value)
+// scanIntensity distinguishes a user-kicked foreground scan from the
+// ambient background rescan. The ambient case must feel reassuring
+// (not "loading"), so we suppress the progress bar and pulsing dot
+// and swap in a quieter message.
+const scanIntensity = ref<ScanIntensity>('normal')
+const isLowIntensity = computed(() => scanRunning.value && scanIntensity.value === 'low')
+const working = computed(
+  () => (scanRunning.value && scanIntensity.value === 'normal') || resyncing.value,
+)
 const flashOk = ref(false)
 const flashDurationMs = 1200
 let flashTimer: number | null = null
 
 const scanPct = computed(() => {
   if (!scanRunning.value || scanTotal.value <= 0) return null
+  if (scanIntensity.value === 'low') return null
   return Math.min(100, Math.round((scanProcessed.value / scanTotal.value) * 100))
 })
 
@@ -73,12 +91,20 @@ const unsubs: Array<() => void> = []
 
 onMounted(() => {
   unsubs.push(
+    onEvent('scan:started', (payload) => {
+      const p = payload as ScanStarted
+      scanIntensity.value = p.intensity === 'low' ? 'low' : 'normal'
+    }),
+  )
+  unsubs.push(
     onEvent('scan:progress', (payload) => {
       const p = payload as ScanProgress
       scanRunning.value = true
       scanProcessed.value = p.processed
       scanTotal.value = p.total
-      if (p.total < 0) {
+      if (scanIntensity.value === 'low') {
+        baseMessage.value = `Syncing in background — ${p.processed.toLocaleString()} checked`
+      } else if (p.total < 0) {
         baseMessage.value = `Scanning — ${p.processed.toLocaleString()} found`
       } else {
         baseMessage.value = `Scanning`
@@ -88,13 +114,31 @@ onMounted(() => {
   unsubs.push(
     onEvent('scan:done', (payload) => {
       const p = payload as ScanDone
+      const wasLow = scanIntensity.value === 'low'
       scanRunning.value = false
       scanProcessed.value = 0
       scanTotal.value = 0
+      scanIntensity.value = 'normal'
       if (p.error) {
         baseMessage.value = `Scan failed — ${p.error}`
       } else if (p.cancelled) {
-        baseMessage.value = `Scan cancelled — ${p.added.toLocaleString()} photos saved`
+        // A cancelled low-intensity sweep is expected (user-activity
+        // preemption) and shouldn't look like a failure. Quietly fall
+        // back to whatever we were showing before.
+        if (wasLow) {
+          baseMessage.value = 'Ready'
+        } else {
+          baseMessage.value = `Scan cancelled — ${p.added.toLocaleString()} photos saved`
+        }
+      } else if (wasLow) {
+        // Background sweep finished — no celebratory pulse. Just note
+        // any new arrivals briefly, then the next library:updated
+        // event returns us to 'Ready'.
+        if (p.added > 0) {
+          baseMessage.value = `Background sync — ${p.added.toLocaleString()} new`
+        } else {
+          baseMessage.value = 'Ready'
+        }
       } else {
         baseMessage.value = `Scan complete — ${p.added.toLocaleString()} photos`
         pulseFlashOk()
@@ -122,12 +166,21 @@ onBeforeUnmount(() => {
     class="status-bar"
     :class="{
       'status-bar--working': working,
+      'status-bar--ambient': isLowIntensity,
       'status-bar--flash-ok': flashOk && !working,
     }"
     aria-live="polite"
   >
     <span class="status-bar__dot" aria-hidden="true" />
-    <span class="status-bar__message">{{ message }}</span>
+    <span
+      class="status-bar__message"
+      :title="isLowIntensity ? 'Kestrel checks your folders for new or removed photos when you’re idle. It runs at low priority and won’t block anything you do — you can close Kestrel any time.' : undefined"
+    >{{ message }}</span>
+    <span
+      v-if="isLowIntensity"
+      class="status-bar__hint"
+      aria-label="Background sync information"
+    >· safe to close or keep using Kestrel</span>
 
     <span v-if="scanPct !== null" class="status-bar__progress" aria-hidden="true">
       <span class="status-bar__progress-track">
@@ -197,6 +250,26 @@ onBeforeUnmount(() => {
 .status-bar--flash-ok .status-bar__dot {
   background: var(--success);
   box-shadow: 0 0 0 2px rgba(75, 178, 110, 0.18);
+}
+
+/* Ambient background-sync state. Deliberately understated: no pulse,
+   no accent glow — just a soft dot and muted copy that says "I'm
+   doing something, but you're not waiting on me." */
+.status-bar--ambient .status-bar__dot {
+  background: var(--text-faint);
+  box-shadow: 0 0 0 2px var(--surface-active);
+  animation: none;
+}
+.status-bar--ambient .status-bar__message {
+  color: var(--text-secondary);
+}
+.status-bar__hint {
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @keyframes status-pulse {

@@ -175,6 +175,43 @@ func (l *Library) PruneMissing(exists func(path string) bool) []string {
 	return missing
 }
 
+// PruneMissingUnder is PruneMissing restricted to photos whose path
+// sits inside root. Used by the background rescanner so a transient
+// stat error inside one watched root can't cascade into dropping
+// photos from unrelated roots. Same lock discipline as PruneMissing:
+// the filesystem check runs outside the lock, only the final delete
+// acquires the writer.
+func (l *Library) PruneMissingUnder(root string, exists func(path string) bool) []string {
+	prefix := strings.TrimRight(root, string(filepath.Separator)) + string(filepath.Separator)
+
+	l.mu.RLock()
+	paths := make([]string, 0, len(l.photos))
+	for p := range l.photos {
+		if strings.HasPrefix(p, prefix) {
+			paths = append(paths, p)
+		}
+	}
+	l.mu.RUnlock()
+
+	missing := make([]string, 0)
+	for _, p := range paths {
+		if !exists(p) {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, p := range missing {
+		delete(l.photos, p)
+	}
+	l.dirty = true
+	return missing
+}
+
 // SetTags replaces the tag set on the photo at path. Input is
 // normalized (lowercased, trimmed, deduplicated) before storage, so
 // callers can pass whatever the user typed. Returns ErrPhotoNotFound

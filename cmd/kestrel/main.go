@@ -28,9 +28,11 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag/geoindex"
 	"github.com/WeaponizedLego/kestrel/internal/persistence"
 	"github.com/WeaponizedLego/kestrel/internal/platform"
+	"github.com/WeaponizedLego/kestrel/internal/rescan"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
 	"github.com/WeaponizedLego/kestrel/internal/server"
 	"github.com/WeaponizedLego/kestrel/internal/thumbnail"
+	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
 
 // autoSaveInterval is how often the background persistence goroutine
@@ -168,7 +170,18 @@ func run(devMode bool, bind string) error {
 		},
 	})
 
-	libraryHandler := api.NewLibraryHandler(lib, runner, clusterMgr, hub)
+	rootsPath, err := platform.WatchedRootsPath()
+	if err != nil {
+		return fmt.Errorf("resolving watched roots path: %w", err)
+	}
+	roots, err := watchroots.Open(rootsPath)
+	if err != nil {
+		// A corrupt file isn't fatal — we warn and carry on with an
+		// empty list. First /api/scan will rewrite the file cleanly.
+		slog.Warn("loading watched roots failed; starting empty", "path", rootsPath, "err", err)
+	}
+
+	libraryHandler := api.NewLibraryHandler(lib, runner, clusterMgr, hub, roots)
 	thumbsHandler := api.NewThumbsHandler(provider)
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
 
@@ -214,8 +227,14 @@ func run(devMode bool, bind string) error {
 			return persistence.Save(metaPath, lib.AllPhotos())
 		},
 		ScanActive: func() bool {
-			id, _ := runner.Active()
-			return id != ""
+			// File ops must not race a user-triggered scan writing
+			// to the library. A low-intensity background rescan,
+			// on the other hand, exists to be yielded to — preempt
+			// it inline so the user's file op can proceed without
+			// seeing "scan in progress".
+			_ = runner.PreemptLowIntensity()
+			id, _, intensity := runner.ActiveDetail()
+			return id != "" && intensity != scanner.IntensityLow
 		},
 		Publisher: hub,
 	})
@@ -239,6 +258,8 @@ func run(devMode bool, bind string) error {
 		}
 	}
 
+	activity := server.NewActivity()
+
 	srv, url, err := server.Start(server.Config{
 		Bind:           bind,
 		Assets:         assetFS,
@@ -249,6 +270,7 @@ func run(devMode bool, bind string) error {
 		TaggingHandler: taggingHandler,
 		FileOpsHandler: fileOpsHandler,
 		Hub:            hub,
+		Activity:       activity,
 	})
 	if err != nil {
 		return fmt.Errorf("starting server: %w", err)
@@ -269,6 +291,22 @@ func run(devMode bool, bind string) error {
 	autoSaveCtx, stopAutoSave := context.WithCancel(context.Background())
 	defer stopAutoSave()
 	go autoSaveLoop(autoSaveCtx, lib, metaPath, autoSaveInterval)
+
+	// Background rescanner: periodically re-walks every watched root
+	// in low-intensity mode so files added or removed outside Kestrel
+	// flow into the library without the user having to remember. Runs
+	// on the same shutdown context as the rest of the process so ^C
+	// drains cleanly.
+	scheduler := rescan.New(rescan.Config{
+		Roots:     roots,
+		Runner:    runner,
+		Library:   lib,
+		Activity:  activity,
+		Publisher: hub,
+	})
+	rescanCtx, stopRescan := context.WithCancel(context.Background())
+	defer stopRescan()
+	go scheduler.Run(rescanCtx)
 
 	shutdownCtx, triggerShutdown := context.WithCancel(context.Background())
 	defer triggerShutdown()
@@ -295,6 +333,11 @@ func run(devMode bool, bind string) error {
 	slog.Info("shutdown requested")
 
 	stopAutoSave()
+	stopRescan()
+	// Drain any active scan before we save and exit — otherwise the
+	// goroutine could still be mutating the library while persistence
+	// takes its snapshot.
+	runner.Shutdown()
 	if err := persistence.Save(metaPath, lib.AllPhotos()); err != nil {
 		slog.Error("final save failed", "path", metaPath, "err", err)
 	}

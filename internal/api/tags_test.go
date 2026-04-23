@@ -17,7 +17,7 @@ func newTagTestHandler(t *testing.T, photos ...*library.Photo) *http.ServeMux {
 		lib.AddPhoto(p)
 	}
 	mux := http.NewServeMux()
-	NewLibraryHandler(lib, nil, nil, nil).Register(mux)
+	NewLibraryHandler(lib, nil, nil, nil, nil).Register(mux)
 	return mux
 }
 

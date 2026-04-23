@@ -14,6 +14,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
 	"github.com/WeaponizedLego/kestrel/internal/platform"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
+	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
 
 // LibraryHandler serves the library endpoints: list/filter photos,
@@ -25,6 +26,7 @@ type LibraryHandler struct {
 	runner    *scanner.Runner
 	clusters  *cluster.Manager
 	publisher scanner.Publisher
+	roots     *watchroots.Store
 }
 
 // NewLibraryHandler wires the handler to the shared library, scan
@@ -35,8 +37,8 @@ type LibraryHandler struct {
 // a mutation endpoint (e.g. bulk tagging) changes what the UI sees;
 // passing nil disables that broadcast but leaves the mutation itself
 // intact.
-func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, clusters *cluster.Manager, publisher scanner.Publisher) *LibraryHandler {
-	return &LibraryHandler{lib: lib, runner: runner, clusters: clusters, publisher: publisher}
+func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, clusters *cluster.Manager, publisher scanner.Publisher, roots *watchroots.Store) *LibraryHandler {
+	return &LibraryHandler{lib: lib, runner: runner, clusters: clusters, publisher: publisher, roots: roots}
 }
 
 // Register attaches every library route to mux. The server strips the
@@ -48,6 +50,7 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/scan", h.scan)
 	mux.HandleFunc("/scan/cancel", h.cancelScan)
 	mux.HandleFunc("/scan/status", h.scanStatus)
+	mux.HandleFunc("/watched-roots", h.watchedRoots)
 	mux.HandleFunc("/browse", h.browse)
 	mux.HandleFunc("/folders", h.folders)
 	mux.HandleFunc("/reveal", h.reveal)
@@ -783,7 +786,51 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Record this folder as a watched root so the background
+	// rescanner keeps it in sync with disk going forward. Failure
+	// here must not block the scan itself — the user's immediate
+	// action succeeds, and they can retry the upsert via a second
+	// scan if the disk write was transient.
+	if h.roots != nil {
+		if err := h.roots.Upsert(req.Folder); err != nil {
+			// Logged at the handler layer rather than returned so a
+			// read-only home dir or similar never breaks scanning.
+			// The scheduler just won't see this root until the store
+			// is writable again.
+			writeJSON(w, http.StatusAccepted, scanResponse{ID: id, Root: req.Folder})
+			return
+		}
+	}
 	writeJSON(w, http.StatusAccepted, scanResponse{ID: id, Root: req.Folder})
+}
+
+// watchedRoots handles GET (list) and DELETE (remove) of watched
+// roots. The list shapes the background rescanner's workload; the
+// delete is the "stop syncing this folder" affordance, and it
+// intentionally does not touch the library — removing photos is a
+// separate user choice (POST /api/folder/remove).
+func (h *LibraryHandler) watchedRoots(w http.ResponseWriter, r *http.Request) {
+	if h.roots == nil {
+		writeError(w, http.StatusServiceUnavailable, "watched roots not configured")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, h.roots.List())
+	case http.MethodDelete:
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			writeError(w, http.StatusBadRequest, "path is required")
+			return
+		}
+		if err := h.roots.Remove(path); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"removed": true})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "only GET and DELETE are allowed")
+	}
 }
 
 // cancelScan responds to POST /api/scan/cancel. Flips the running
@@ -808,10 +855,11 @@ func (h *LibraryHandler) scanStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
 		return
 	}
-	id, root := h.runner.Active()
+	id, root, intensity := h.runner.ActiveDetail()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"running": id != "",
-		"id":      id,
-		"root":    root,
+		"running":   id != "",
+		"id":        id,
+		"root":      root,
+		"intensity": intensity,
 	})
 }

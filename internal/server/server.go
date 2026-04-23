@@ -50,6 +50,11 @@ type Config struct {
 
 	// Hub fans events out to /ws subscribers. Required.
 	Hub *Hub
+
+	// Activity tracks the last user-originated API request. Optional:
+	// nil disables idle tracking (the background rescanner will then
+	// run whenever its other gates allow). See internal/rescan.
+	Activity *Activity
 }
 
 // Start binds a listener, wires the router, and starts serving in a
@@ -94,7 +99,7 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	if cfg.FileOpsHandler != nil {
 		cfg.FileOpsHandler.Register(apiMux)
 	}
-	mux.Handle("/api/", tokenMiddleware(cfg.Token, http.StripPrefix("/api", apiMux)))
+	mux.Handle("/api/", tokenMiddleware(cfg.Token, activityMiddleware(cfg.Activity, http.StripPrefix("/api", apiMux))))
 }
 
 // Shutdown is a thin wrapper so callers don't import net/http just to
