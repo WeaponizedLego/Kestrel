@@ -12,7 +12,7 @@ High-performance desktop photo manager for very large local libraries (20,000 �
 
 ## Install
 
-Kestrel ships as a single self-contained download per platform — no Go or Node toolchain required to run it. Builds are produced by the [Build Matrix workflow](.github/workflows/build-matrix.yml) and attached to each green CI run as artifacts.
+Kestrel ships as a single self-contained download per platform — no Go or Node toolchain required to run it. Tagged releases (`vX.Y.Z`) are published on the [Releases page](../../releases) with all platform artifacts attached; bleeding-edge builds from every green CI run are also available as artifacts on the [Build Matrix workflow](.github/workflows/build-matrix.yml).
 
 ### macOS (Apple Silicon)
 
@@ -31,9 +31,12 @@ Builds are unsigned today — proper notarization is a tracked follow-up.
 
 The AppImage requires FUSE 2 on the host (preinstalled on most desktop distros).
 
-### Windows
+### Windows (x86_64)
 
-Not packaged yet — the raw `kestrel-windows-amd64.exe` from CI artifacts works but spawns a console window. Tracked as a follow-up.
+1. Download `Kestrel-windows-amd64.zip` and extract it — you'll get `kestrel-windows-amd64.exe`.
+2. Double-click the `.exe`, or run it from a terminal.
+
+Windows SmartScreen may warn that the publisher is unknown — click **More info → Run anyway**. A console window opens alongside the browser today; hiding it (`-H=windowsgui`) is a tracked follow-up because it also suppresses stdout logs.
 
 ## Usage
 

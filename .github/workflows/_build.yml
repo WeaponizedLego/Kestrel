@@ -1,0 +1,190 @@
+name: Reusable build
+
+# Reusable workflow that builds the frontend, cross-compiles the Go
+# binary for every supported target, and packages the platform-
+# specific installers (AppImage, macOS .app, Windows zip). Called by
+# build-matrix.yml (PRs + main) and release.yml (tag pushes).
+#
+# Keep the build recipe in one place so PR CI and release builds can't
+# drift.
+
+on:
+  workflow_call:
+    inputs:
+      retention-days:
+        description: How long to keep uploaded artifacts.
+        required: false
+        type: number
+        default: 14
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    env:
+      CGO_ENABLED: 0
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          # vue-tsc and tsx run on the host — don't let the cross-
+          # compilation env leak into their own toolchain.
+          CGO_ENABLED: 1
+          GOOS:
+          GOARCH:
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Vet
+        # vet only needs to run once, but running per-target catches
+        # any build-tag-gated file that breaks on a specific GOOS.
+        run: go vet ./...
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          go build -trimpath -ldflags="-s -w" \
+            -o "dist/kestrel-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" \
+            ./cmd/kestrel
+
+      - name: Package AppImage
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          icon_arg=()
+          if [ -f assets/icon/icon.png ]; then icon_arg=(--icon assets/icon/icon.png); fi
+          ./scripts/package-linux.sh "dist/kestrel-linux-amd64" dist "${icon_arg[@]}"
+
+      - name: Package Windows zip
+        if: matrix.goos == 'windows'
+        working-directory: dist
+        run: zip "Kestrel-windows-amd64.zip" "kestrel-windows-amd64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/kestrel-${{ matrix.goos }}-${{ matrix.goarch }}*
+            dist/Kestrel-x86_64.AppImage
+            dist/Kestrel-windows-amd64.zip
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  package-macos:
+    name: Package macOS .app (arm64)
+    runs-on: macos-latest
+    env:
+      CGO_ENABLED: 0
+      GOOS: darwin
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          CGO_ENABLED: 1
+          GOOS:
+          GOARCH:
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" \
+            -o "dist/kestrel" \
+            ./cmd/kestrel
+
+      - name: Package .app
+        run: |
+          icon_arg=()
+          if [ -f assets/icon/icon.png ]; then icon_arg=(--icon assets/icon/icon.png); fi
+          ./scripts/package-macos.sh dist/kestrel dist "${icon_arg[@]}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-macos-arm64-app
+          path: dist/Kestrel-macos-arm64.zip
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  test:
+    name: Test (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build frontend
+        # internal/assets uses //go:embed all:dist, so the frontend
+        # must be built before anything importing that package can
+        # compile — including tests.
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - run: go test -race ./...

@@ -1,0 +1,48 @@
+name: Release
+
+# Triggered when a vX.Y.Z tag is pushed. Runs the shared build recipe
+# from _build.yml for every target platform, then attaches every
+# packaged artifact to a GitHub Release for that tag.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build.yml
+    with:
+      retention-days: 90
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Kestrel-x86_64.AppImage
+            dist/Kestrel-macos-arm64.zip
+            dist/Kestrel-windows-amd64.zip
+            dist/kestrel-linux-amd64
+            dist/kestrel-linux-arm64
+            dist/kestrel-darwin-amd64
+            dist/kestrel-darwin-arm64
+            dist/kestrel-windows-amd64.exe
