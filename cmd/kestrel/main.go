@@ -31,6 +31,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/rescan"
 	"github.com/WeaponizedLego/kestrel/internal/scanner"
 	"github.com/WeaponizedLego/kestrel/internal/server"
+	"github.com/WeaponizedLego/kestrel/internal/settings"
 	"github.com/WeaponizedLego/kestrel/internal/thumbnail"
 	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
@@ -191,10 +192,22 @@ func run(devMode bool, bind string) error {
 		slog.Warn("loading watched roots failed; starting empty", "path", rootsPath, "err", err)
 	}
 
+	settingsPath, err := platform.SettingsPath()
+	if err != nil {
+		return fmt.Errorf("resolving settings path: %w", err)
+	}
+	settingsStore, err := settings.Open(settingsPath)
+	if err != nil {
+		// A corrupt or unreadable file isn't fatal — Open returns a
+		// store seeded with defaults. The next PUT rewrites the file.
+		slog.Warn("loading settings failed; starting with defaults", "path", settingsPath, "err", err)
+	}
+
 	libraryHandler := api.NewLibraryHandler(lib, runner, clusterMgr, hub, roots)
 	thumbsHandler := api.NewThumbsHandler(provider)
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
 	capabilitiesHandler := api.NewCapabilitiesHandler()
+	settingsHandler := api.NewSettingsHandler(settingsStore)
 
 	// File operations: journal is write-ahead, trash is Kestrel-managed.
 	// Recovery runs before the HTTP server starts so any in-flight op
@@ -281,6 +294,8 @@ func run(devMode bool, bind string) error {
 		TaggingHandler:      taggingHandler,
 		FileOpsHandler:      fileOpsHandler,
 		CapabilitiesHandler: capabilitiesHandler,
+		SettingsHandler:     settingsHandler,
+		Theme:               func() string { return settingsStore.Get().Theme },
 		Hub:                 hub,
 		Activity:            activity,
 	})

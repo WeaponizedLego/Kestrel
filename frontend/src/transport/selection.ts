@@ -8,6 +8,7 @@
 // value. Anything that lives inside one island stays inside it.
 
 import { ref, watch } from 'vue'
+import { apiGet, apiPut } from './api'
 
 // selectedFolder drives the photo grid's ?folder= filter. null means
 // "no filter — show all photos". Any absolute path asks the backend
@@ -87,25 +88,36 @@ export function addPathsToSelection(paths: Iterable<string>) {
 export const CELL_SIZE_MIN = 140
 export const CELL_SIZE_MAX = 480
 export const CELL_SIZE_STEP = 20
-const CELL_SIZE_STORAGE_KEY = 'kestrel.cellSize'
 
-function loadPersistedCellSize(): number {
-  if (typeof localStorage === 'undefined') return 280
-  const raw = localStorage.getItem(CELL_SIZE_STORAGE_KEY)
-  if (!raw) return 280
-  const n = Number.parseInt(raw, 10)
-  if (!Number.isFinite(n)) return 280
-  return Math.min(CELL_SIZE_MAX, Math.max(CELL_SIZE_MIN, n))
-}
+export const cellSize = ref<number>(280)
 
-export const cellSize = ref<number>(loadPersistedCellSize())
-
+// Hydrate from the server-side settings store. Browser localStorage
+// can't be used: the prod binary binds a random loopback port each
+// launch and localStorage is keyed per-origin, so any value stored
+// there is lost on every restart. This module is imported by Sidebar,
+// Toolbar and PhotoGrid; the GET runs once per page load thanks to
+// ES-module caching.
 if (typeof window !== 'undefined') {
+  apiGet<{ cell_size?: number }>('/api/settings')
+    .then((s) => {
+      if (typeof s.cell_size === 'number' && Number.isFinite(s.cell_size)) {
+        cellSize.value = Math.min(CELL_SIZE_MAX, Math.max(CELL_SIZE_MIN, s.cell_size))
+      }
+    })
+    .catch((err) => {
+      // Defaults are already applied — log and move on.
+      console.warn('loading cell size failed', err)
+    })
+
+  // Debounce so the slider drag (which fires per pixel) doesn't flood
+  // the backend with PUTs.
+  let saveTimer: number | null = null
   watch(cellSize, (value) => {
-    try {
-      localStorage.setItem(CELL_SIZE_STORAGE_KEY, String(value))
-    } catch {
-      // Storage may be unavailable (private mode, quota); ignore.
-    }
+    if (saveTimer !== null) window.clearTimeout(saveTimer)
+    saveTimer = window.setTimeout(() => {
+      apiPut('/api/settings', { cell_size: value }).catch((err) => {
+        console.warn('persisting cell size failed', err)
+      })
+    }, 200)
   })
 }

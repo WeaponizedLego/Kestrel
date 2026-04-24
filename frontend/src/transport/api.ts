@@ -36,6 +36,19 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: {
+      'X-Kestrel-Token': token,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw await apiError(path, res)
+  return res.json() as Promise<T>
+}
+
 // apiError builds a single Error whose message is the server's JSON
 // {"error": "..."} payload when present, falling back to the status
 // line. Callers surface .message directly to users, so keep it short

@@ -53,6 +53,18 @@ type Config struct {
 	// frontend treats every capability as false.
 	CapabilitiesHandler *api.CapabilitiesHandler
 
+	// SettingsHandler exposes the durable UI preferences (theme, sort,
+	// cell size). Optional: nil disables the endpoint, in which case
+	// the frontend falls back to its built-in defaults.
+	SettingsHandler *api.SettingsHandler
+
+	// Theme returns the currently-persisted theme name. Used by the
+	// asset handler to inject a <meta name="kestrel-theme"> tag into
+	// index.html so the daisyUI theme is applied before any JS runs.
+	// Optional: nil leaves the meta tag empty and the frontend uses
+	// its compiled-in default.
+	Theme func() string
+
 	// Hub fans events out to /ws subscribers. Required.
 	Hub *Hub
 
@@ -77,7 +89,7 @@ func Start(cfg Config) (*http.Server, string, error) {
 		mux.Handle("/ws", wsHandler(cfg.Hub, cfg.Token, listener.Addr().String(), cfg.DevMode))
 	}
 	if !cfg.DevMode && cfg.Assets != nil {
-		mux.Handle("/", assetsHandler(cfg.Assets, cfg.Token))
+		mux.Handle("/", assetsHandler(cfg.Assets, cfg.Token, cfg.Theme))
 	}
 
 	srv := &http.Server{Handler: mux}
@@ -106,6 +118,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.CapabilitiesHandler != nil {
 		cfg.CapabilitiesHandler.Register(apiMux)
+	}
+	if cfg.SettingsHandler != nil {
+		cfg.SettingsHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, activityMiddleware(cfg.Activity, http.StripPrefix("/api", apiMux))))
 }

@@ -40,6 +40,17 @@ func FileOpsJournalPath() (string, error) {
 	return appDataPath("fileops.journal")
 }
 
+// SettingsPath returns the absolute path of settings.json under the
+// user's config directory. Holds small UI preferences (theme, sort
+// key/order, grid cell size) that used to live in browser localStorage
+// — but the production binary binds 127.0.0.1 on a random port each
+// launch, and localStorage is keyed per-origin, so anything stored in
+// the browser is lost on every restart. Persisting them server-side
+// makes them survive port changes.
+func SettingsPath() (string, error) {
+	return appDataPath("settings.json")
+}
+
 // WatchedRootsPath returns the absolute path of watched_roots.json
 // under the user's config directory. This file is the durable list of
 // folders the background rescanner should keep in sync with disk —

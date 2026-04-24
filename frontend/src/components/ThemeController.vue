@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-
-const STORAGE_KEY = 'kestrel-theme'
+import { ref } from 'vue'
+import { apiPut } from '../transport/api'
 
 // Must match the themes enabled in src/shell/app.css.
 const themes = [
@@ -12,18 +11,29 @@ const themes = [
   'night', 'coffee', 'winter', 'dim', 'nord', 'sunset',
 ]
 
-const current = ref('dark')
+// Read the persisted theme synchronously: the Go server injected it
+// into <meta name="kestrel-theme"> on this request, and the inline
+// bootstrap in index.html already applied it to <html data-theme>
+// before any island mounted. Falls back to whatever the DOM has so
+// dev mode (where Vite serves index.html and no meta is rewritten)
+// still picks up the compiled-in default.
+function initialTheme(): string {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="kestrel-theme"]')
+  if (meta && meta.content) return meta.content
+  return document.documentElement.dataset.theme || 'dark'
+}
 
-onMounted(() => {
-  const stored = localStorage.getItem(STORAGE_KEY)
-  if (stored) current.value = stored
-  else current.value = document.documentElement.dataset.theme || 'dark'
-})
+const current = ref(initialTheme())
 
 function pick(theme: string) {
   current.value = theme
   document.documentElement.dataset.theme = theme
-  try { localStorage.setItem(STORAGE_KEY, theme) } catch {}
+  // Fire-and-forget: a failed PUT just means the theme reverts on the
+  // next launch. Surfacing a toast for "couldn't save your theme"
+  // would be louder than the cost of losing it.
+  apiPut('/api/settings', { theme }).catch((err) => {
+    console.warn('persisting theme failed', err)
+  })
 }
 </script>
 

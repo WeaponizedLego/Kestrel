@@ -26,8 +26,12 @@ const islandEntries = [
 
 // Runs in <head> before any island bootstraps so daisyUI's data-theme
 // is applied before first paint — prevents a flash of the default
-// theme when the user has picked another one.
-const themeBootstrap = `(function(){try{var t=localStorage.getItem('kestrel-theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}})();`
+// theme when the user has picked another one. The theme is read from
+// the <meta name="kestrel-theme"> tag the Go server injects per
+// request (see internal/server/assets.go), not from localStorage:
+// the prod binary binds a random loopback port each launch so
+// localStorage (which is keyed per-origin) doesn't survive restarts.
+const themeBootstrap = `(function(){try{var m=document.querySelector('meta[name="kestrel-theme"]');var t=m&&m.content;if(t)document.documentElement.dataset.theme=t;}catch(e){}})();`
 
 async function main() {
   const shellMarkup = await renderToString(createSSRApp(Shell))
@@ -43,6 +47,7 @@ async function main() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kestrel</title>
     <!--KESTREL_TOKEN_META-->
+    <!--KESTREL_THEME_META-->
     <script>${themeBootstrap}</script>
     <link rel="stylesheet" href="/src/shell/app.css" />
   </head>

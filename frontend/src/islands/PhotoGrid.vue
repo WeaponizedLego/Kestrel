@@ -9,7 +9,7 @@ import {
   shallowRef,
   watch,
 } from 'vue'
-import { apiGet, apiPost, friendlyError } from '../transport/api'
+import { apiGet, apiPost, apiPut, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc, onThumbnailReady } from '../transport/thumbs'
 import {
@@ -119,20 +119,25 @@ const viewerRef = ref<{ openPreview: () => void } | null>(null)
 // composes query params and debounces the search typing.
 type SortKey = 'name' | 'date' | 'size'
 type SortOrder = 'asc' | 'desc'
-const SORT_KEY_STORAGE = 'kestrel.sortKey'
-const SORT_ORDER_STORAGE = 'kestrel.sortOrder'
-function loadSortKey(): SortKey {
-  if (typeof localStorage === 'undefined') return 'date'
-  const raw = localStorage.getItem(SORT_KEY_STORAGE)
-  return raw === 'name' || raw === 'date' || raw === 'size' ? raw : 'date'
-}
-function loadSortOrder(): SortOrder {
-  if (typeof localStorage === 'undefined') return 'desc'
-  const raw = localStorage.getItem(SORT_ORDER_STORAGE)
-  return raw === 'asc' || raw === 'desc' ? raw : 'desc'
-}
-const sortKey = ref<SortKey>(loadSortKey())
-const sortOrder = ref<SortOrder>(loadSortOrder())
+const sortKey = ref<SortKey>('date')
+const sortOrder = ref<SortOrder>('desc')
+
+// Hydrate sort prefs from the server-side settings store. localStorage
+// can't be used here — the prod binary binds a random loopback port
+// each launch and localStorage is keyed per-origin, so any value
+// stored there evaporates on restart.
+apiGet<{ sort_key?: string; sort_order?: string }>('/api/settings')
+  .then((s) => {
+    if (s.sort_key === 'name' || s.sort_key === 'date' || s.sort_key === 'size') {
+      sortKey.value = s.sort_key
+    }
+    if (s.sort_order === 'asc' || s.sort_order === 'desc') {
+      sortOrder.value = s.sort_order
+    }
+  })
+  .catch((err) => {
+    console.warn('loading sort preferences failed', err)
+  })
 const searchTokens = ref<string[]>([])
 const searchMode = ref<'all' | 'any'>('all')
 const searchDebounced = ref('')
@@ -712,8 +717,16 @@ watch([sortKey, sortOrder, searchDebounced, searchMode, selectedFolder], () => {
   loadPhotos()
 })
 
-watch(sortKey, (v) => { try { localStorage.setItem(SORT_KEY_STORAGE, v) } catch {} })
-watch(sortOrder, (v) => { try { localStorage.setItem(SORT_ORDER_STORAGE, v) } catch {} })
+watch(sortKey, (v) => {
+  apiPut('/api/settings', { sort_key: v }).catch((err) => {
+    console.warn('persisting sort key failed', err)
+  })
+})
+watch(sortOrder, (v) => {
+  apiPut('/api/settings', { sort_order: v }).catch((err) => {
+    console.warn('persisting sort order failed', err)
+  })
+})
 
 // When the user drags the size slider, anchor the top-visible photo so
 // resizing doesn't warp them to a different part of the library. We
