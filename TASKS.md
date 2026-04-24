@@ -39,19 +39,30 @@ so the ONNX implementation can land behind a build tag without churn.
   - `align/` — 5-landmark 2D similarity transform for ArcFace crops. No CGO.
 - [x] Table-driven tests for each helper (no model weights needed).
 
-## Phase 1 — ONNX plumbing  *(needs ONNX Runtime installed)*
+## Phase 1 — ONNX plumbing  *(done at the code level; runtime needs models)*
 
-- [ ] `go get github.com/yalue/onnxruntime_go`.
-- [ ] `model/detector.go` — SCRFD session wrapper, returns `[]FaceBox` with
-      bbox + 5 landmarks + score. Post-process: decode anchor output, NMS.
-- [ ] `model/embedder.go` — ArcFace session wrapper, returns 512-d L2-normalised
-      vector for a pre-aligned 112×112 crop.
-- [ ] `model/objects.go` — YOLOv8n session wrapper, returns `[]ObjectHit`
-      with label + confidence + bbox. Post-process: decode output grid, NMS.
-- [ ] `pipeline_cgo.go` orchestration:
-      decode → SCRFD → align+crop per face → ArcFace → YOLOv8 → marshal.
-- [ ] One end-to-end test against a tiny committed fixture image (known faces,
-      known objects) with a tolerance on bbox coords and cosine similarity.
+- [x] `go get github.com/yalue/onnxruntime_go` (added as direct dependency).
+- [x] `model/runtime_cgo.go` — env init/destroy refcount, shared-library
+      path discovery (`ORT_SHARED_LIBRARY` env + sidecar-adjacent fallback),
+      model-path resolver.
+- [x] `model/detector_cgo.go` — SCRFD session wrapper. Allocates 9 output
+      tensors (3 strides × {score, bbox, kps}), decodes anchors across all
+      three strides, NMS with IoU 0.4, un-letterboxes to original pixels,
+      caps at 50 faces per image.
+- [x] `model/embedder_cgo.go` — ArcFace r100 session wrapper. Fixed
+      [1,3,112,112] input / [1,512] output, L2-normalises output in place.
+- [x] `model/objects_cgo.go` — YOLOv8n session wrapper. Decodes the 84×8400
+      channel-major output, per-class NMS (IoU 0.45, conf 0.25), Top-K 100,
+      un-letterboxes, maps class indices to COCO labels.
+- [x] `pipeline_cgo.go` orchestration — already wired in Phase 0.
+- [ ] **Blocked on Phase 2** — one end-to-end test against a tiny committed
+      fixture image (known faces, known objects). Needs the real `.onnx`
+      files, so it lands together with the model-fetch script.
+
+**Runtime state:** under CGO=1 builds, the sidecar binary compiles and runs.
+Start it with `ORT_SHARED_LIBRARY=/path/to/libonnxruntime.so
+./kestrel-vision --models /path/to/models-dir` once you have the three files.
+A missing model file errors out at startup with a clear message.
 
 ## Phase 2 — Ship the weights
 

@@ -7,4 +7,7 @@ require (
 	golang.org/x/image v0.39.0
 )
 
-require github.com/coder/websocket v1.8.14 // indirect
+require (
+	github.com/coder/websocket v1.8.14 // indirect
+	github.com/yalue/onnxruntime_go v1.28.0 // indirect
+)
