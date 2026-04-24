@@ -4,7 +4,8 @@
 # Usage: scripts/package-linux.sh <binary> <out-dir> [--icon path/to/icon.png]
 #
 # appimagetool is downloaded into <out-dir>/tools/ on first run and reused.
-# Requires FUSE on the build host (works on GitHub's ubuntu-latest runner).
+# We invoke it with --appimage-extract-and-run so the build host does not
+# need libfuse2 (GitHub's ubuntu-24.04 runner image dropped it).
 #
 # Output: <out-dir>/Kestrel-x86_64.AppImage
 set -euo pipefail
@@ -75,6 +76,6 @@ fi
 
 OUT_FILE="$OUT_DIR/Kestrel-x86_64.AppImage"
 rm -f "$OUT_FILE"
-ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$OUT_FILE"
+ARCH=x86_64 "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUT_FILE"
 
 echo "built: $OUT_FILE"
