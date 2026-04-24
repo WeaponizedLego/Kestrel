@@ -112,6 +112,7 @@ const viewerIndex = ref(-1)
 const viewerPhoto = computed<Photo | null>(() =>
   viewerIndex.value >= 0 ? photos.value[viewerIndex.value] ?? null : null,
 )
+const viewerRef = ref<{ openPreview: () => void } | null>(null)
 
 // Sort + search controls. Server does the heavy lifting (see
 // CLAUDE.md: "No JS-side sorting or filtering"); the grid just
@@ -347,6 +348,18 @@ function onCellClick(index: number, e: MouseEvent) {
     return
   }
   openAt(index)
+}
+
+// onCellDblClick is the shortcut for "open the full-size lightbox
+// preview". It reuses openAt() so selection/viewer state match a
+// normal click, then flips the viewer's previewOpen flag — which
+// streams the original file from /api/photo (not the thumbnail).
+async function onCellDblClick(index: number) {
+  if (index < 0 || index >= photos.value.length) return
+  const wasClosed = viewerIndex.value < 0
+  openAt(index)
+  if (wasClosed) await nextTick()
+  viewerRef.value?.openPreview()
 }
 
 // multiSelection photos — the panel switches to SelectionSummary when
@@ -854,6 +867,7 @@ watch(cellSize, (_newSize, oldSize) => {
             :style="{ transform: `translate(${cell.x}px, ${cell.y}px)` }"
             :data-index="cell.index"
             @click="onCellClick(cell.index, $event)"
+            @dblclick.stop="onCellDblClick(cell.index)"
             @focus="focused = cell.index"
           >
             <img
@@ -894,6 +908,7 @@ watch(cellSize, (_newSize, oldSize) => {
       />
       <PhotoViewer
         v-else-if="viewerPhoto"
+        ref="viewerRef"
         :photo="viewerPhoto"
         @close="closeViewer"
         @prev="openAt(viewerIndex - 1)"

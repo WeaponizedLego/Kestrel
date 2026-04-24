@@ -1,21 +1,95 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
-import { photoSrc } from '../transport/api'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import type { Photo } from '../types'
 import { isVideo } from '../util/media'
 
 const props = defineProps<{ photo: Photo }>()
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'prev'): void
+  (e: 'next'): void
+}>()
+
+const src = computed(() => photoSrc(props.photo.Path))
+const video = computed(() => isVideo(props.photo))
 
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    e.stopPropagation()
-    emit('close')
+  switch (e.key) {
+    case 'Escape':
+      e.stopPropagation()
+      emit('close')
+      break
+    case 'ArrowLeft':
+      e.stopPropagation()
+      emit('prev')
+      break
+    case 'ArrowRight':
+      e.stopPropagation()
+      emit('next')
+      break
   }
 }
 
 onMounted(() => window.addEventListener('keydown', onKey, true))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
+
+const revealError = ref<string | null>(null)
+async function revealInFolder() {
+  revealError.value = null
+  try {
+    await apiPost<{ revealed: boolean }>('/api/reveal', { path: props.photo.Path })
+  } catch (err) {
+    revealError.value = friendlyError(err)
+  }
+}
+
+const copyState = ref<'idle' | 'copying' | 'copied' | 'error'>('idle')
+const copyError = ref<string | null>(null)
+let copyResetTimer: number | null = null
+
+async function copyImage() {
+  if (copyState.value === 'copying' || video.value) return
+  copyError.value = null
+  copyState.value = 'copying'
+  try {
+    const res = await fetch(src.value)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const sourceBlob = await res.blob()
+    const pngBlob = await encodePng(sourceBlob)
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+    flashCopyState('copied')
+  } catch (err) {
+    copyError.value = friendlyError(err)
+    flashCopyState('error')
+  }
+}
+
+async function encodePng(source: Blob): Promise<Blob> {
+  const bitmap = await createImageBitmap(source)
+  const canvas = document.createElement('canvas')
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('canvas 2d context unavailable')
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close?.()
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error('png encode failed'))),
+      'image/png',
+    )
+  })
+}
+
+function flashCopyState(next: 'copied' | 'error') {
+  copyState.value = next
+  if (copyResetTimer !== null) window.clearTimeout(copyResetTimer)
+  copyResetTimer = window.setTimeout(() => {
+    copyState.value = 'idle'
+    copyResetTimer = null
+  }, 1800)
+}
 </script>
 
 <template>
@@ -26,7 +100,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
     @click.self="emit('close')"
   >
     <div
-      class="modal-box relative flex max-h-[95vh] max-w-[95vw] items-center justify-center bg-base-100 p-0"
+      class="modal-box relative flex h-[95vh] w-[95vw] max-w-[95vw] flex-col items-stretch overflow-hidden bg-base-100 p-0"
       @click.stop
     >
       <button
@@ -37,20 +111,51 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
       >
         ✕
       </button>
-      <video
-        v-if="isVideo(photo)"
-        :src="photoSrc(photo.Path)"
-        controls
-        autoplay
-        preload="metadata"
-        class="max-h-[92vh] max-w-[95vw] rounded"
-      />
-      <img
-        v-else
-        :src="photoSrc(photo.Path)"
-        :alt="photo.Name"
-        class="max-h-[92vh] max-w-[95vw] object-contain rounded"
-      />
+
+      <div class="relative min-h-0 flex-1 p-2">
+        <video
+          v-if="video"
+          :src="src"
+          controls
+          autoplay
+          preload="metadata"
+          class="absolute inset-0 m-auto max-h-full max-w-full rounded"
+        />
+        <img
+          v-else
+          :src="src"
+          :alt="photo.Name"
+          class="absolute inset-0 m-auto max-h-full max-w-full object-contain rounded"
+        />
+      </div>
+
+      <footer class="flex flex-col gap-2 border-t border-base-300 px-4 py-3">
+        <div class="flex flex-wrap justify-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline" aria-label="Previous photo" @click="emit('prev')">← Prev</button>
+          <button type="button" class="btn btn-sm btn-outline" aria-label="Next photo" @click="emit('next')">Next →</button>
+          <button
+            v-if="!video"
+            type="button"
+            :class="[
+              'btn btn-sm',
+              copyState === 'copied' ? 'btn-success' : '',
+              copyState === 'error' ? 'btn-error' : 'btn-outline',
+            ]"
+            :disabled="copyState === 'copying'"
+            @click="copyImage"
+          >
+            {{
+              copyState === 'copying' ? 'Copying…' :
+              copyState === 'copied'  ? 'Copied ✓' :
+              copyState === 'error'   ? 'Copy failed' :
+              'Copy image'
+            }}
+          </button>
+          <button type="button" class="btn btn-sm btn-outline" @click="revealInFolder">Show in folder</button>
+        </div>
+        <p v-if="copyError && copyState === 'error'" class="text-center text-error text-xs" role="alert">{{ copyError }}</p>
+        <p v-if="revealError" class="text-center text-error text-xs" role="alert">{{ revealError }}</p>
+      </footer>
     </div>
   </div>
 </template>

@@ -42,6 +42,8 @@ function formatDate(raw: string | undefined): string {
 }
 
 const previewOpen = ref(false)
+function openPreview() { previewOpen.value = true }
+defineExpose({ openPreview })
 
 function onKey(e: KeyboardEvent) {
   if (previewOpen.value) return
@@ -234,6 +236,12 @@ async function commitTags(next: string[]) {
       <p v-if="tagError" class="text-error text-xs mt-1" role="alert">{{ tagError }}</p>
     </section>
 
-    <LightboxModal v-if="previewOpen" :photo="photo" @close="previewOpen = false" />
+    <LightboxModal
+      v-if="previewOpen"
+      :photo="photo"
+      @close="previewOpen = false"
+      @prev="emit('prev')"
+      @next="emit('next')"
+    />
   </aside>
 </template>
