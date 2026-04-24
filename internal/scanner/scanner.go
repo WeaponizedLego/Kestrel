@@ -33,6 +33,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/library"
 	"github.com/WeaponizedLego/kestrel/internal/metadata"
 	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
+	"github.com/WeaponizedLego/kestrel/internal/vision/protocol"
 )
 
 // pathQueueSize bounds how many discovered paths can sit in the channel
@@ -67,6 +68,16 @@ type ThumbStore interface {
 // treated as absent by consumers.
 type Thumbnailer func(path string) ([]byte, uint64, error)
 
+// Detector is the minimum surface the scanner needs from
+// internal/vision. Declared here (not imported) so the dependency
+// direction stays scanner → protocol only. A nil Detector, or one
+// whose Available returns false, disables detection for the scan —
+// every other pipeline step runs unchanged.
+type Detector interface {
+	Available() bool
+	Detect(ctx context.Context, path string) (*protocol.DetectResponse, error)
+}
+
 // Library is the slice of *library.Library Scan writes into. Declared
 // as an interface so tests can stub it with a recording fake.
 //
@@ -86,6 +97,12 @@ type Options struct {
 	Publisher   Publisher
 	ThumbStore  ThumbStore
 	Thumbnailer Thumbnailer
+
+	// Detector is the optional vision sidecar client. When nil or
+	// when Available reports false, detection is skipped entirely
+	// and the rest of the pipeline runs unchanged — graceful
+	// degradation is a core property of the sidecar architecture.
+	Detector Detector
 
 	// Autotag is passed to internal/metadata/autotag.Derive on every
 	// fresh photo. The zero value is safe: it produces a minimal set
@@ -287,6 +304,9 @@ func processPaths(
 				// next successful rebuild.
 				slog.Warn("thumbnail generation failed", "path", path, "err", err)
 			}
+			// Detection is best-effort too: a sidecar failure never
+			// loses the photo or blocks the scan.
+			applyDetection(ctx, photo, opts)
 			lib.AddPhoto(photo)
 
 			n := added.Add(1)
@@ -428,6 +448,47 @@ func buildPhoto(path string, autotagOpts autotag.Options) (*library.Photo, error
 		CameraMake: meta.CameraMake,
 		AutoTags:   autotag.Derive(path, meta, autotagOpts),
 	}, nil
+}
+
+// applyDetection asks the vision sidecar about photo and merges the
+// response into Faces (structured) and AutoTags (as object:<label>).
+// Every failure mode — nil detector, unavailable, per-image error —
+// is logged at debug and dropped. The scan completes regardless; a
+// later re-scan with a healthy sidecar fills in what was missed.
+//
+// Object labels are routed through autotag's canonical formatter so
+// "Golden Retriever" from a hypothetical finer-grained model collapses
+// to "golden-retriever" just like folder/camera names do.
+func applyDetection(ctx context.Context, photo *library.Photo, opts Options) {
+	if opts.Detector == nil || !opts.Detector.Available() {
+		return
+	}
+	result, err := opts.Detector.Detect(ctx, photo.Path)
+	if err != nil {
+		slog.Debug("vision detection skipped", "path", photo.Path, "err", err)
+		return
+	}
+	if len(result.Faces) > 0 {
+		faces := make([]library.FaceDetection, 0, len(result.Faces))
+		for _, f := range result.Faces {
+			faces = append(faces, library.FaceDetection{
+				BBox:       [4]int{f.BBox.X, f.BBox.Y, f.BBox.W, f.BBox.H},
+				Embedding:  f.Embedding,
+				Confidence: f.Confidence,
+			})
+		}
+		photo.Faces = faces
+	}
+	if len(result.Objects) > 0 {
+		labels := make([]string, 0, len(result.Objects))
+		for _, o := range result.Objects {
+			if o.Label == "" {
+				continue
+			}
+			labels = append(labels, "object:"+o.Label)
+		}
+		photo.AutoTags = autotag.MergeAndNormalize(photo.AutoTags, labels)
+	}
 }
 
 // hashFile streams path through SHA-256 and returns the hex digest.

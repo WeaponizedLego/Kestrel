@@ -1,0 +1,25 @@
+name: Vision Build
+
+# Path-filtered CI for the kestrel-vision sidecar. Only runs when the
+# sidecar sources or the shared protocol types change, so a core-only
+# PR doesn't pay the (eventually heavier, ONNX-linked) vision build.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cmd/kestrel-vision/**'
+      - 'internal/vision/**'
+      - '.github/workflows/_build-vision.yml'
+      - '.github/workflows/vision-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/kestrel-vision/**'
+      - 'internal/vision/**'
+      - '.github/workflows/_build-vision.yml'
+      - '.github/workflows/vision-build.yml'
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build-vision.yml

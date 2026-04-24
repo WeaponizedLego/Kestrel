@@ -1,11 +1,80 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, computed, reactive } from 'vue'
+import { onMounted, onUnmounted, ref, computed, reactive, watch } from 'vue'
 import { apiGet, apiPost, friendlyError } from '../transport/api'
 import { onEvent } from '../transport/events'
 import { thumbSrc } from '../transport/thumbs'
 import { onOpenTaggingQueue } from '../transport/tagging'
+import { fetchVisionStatus, type VisionStatus } from '../transport/vision'
 import TagInput from '../components/TagInput.vue'
 import type { TaggingProgress, UntaggedFolder } from '../types'
+
+interface FaceCluster {
+  id: string
+  members: string[]
+  size: number
+  untagged: number
+}
+
+type Mode = 'folders' | 'faces'
+const mode = ref<Mode>('folders')
+
+const faceClusters = ref<FaceCluster[]>([])
+const faceLoading = ref(false)
+const faceError = ref<string | null>(null)
+const activeFaceCluster = ref<FaceCluster | null>(null)
+const personName = ref('')
+const applyingFace = ref(false)
+const visionStatus = ref<VisionStatus | null>(null)
+
+const visionOn = computed(() => visionStatus.value?.state === 'on')
+
+async function refreshFaceClusters(): Promise<void> {
+  faceLoading.value = true
+  faceError.value = null
+  try {
+    const [status, res] = await Promise.all([
+      fetchVisionStatus(false),
+      apiGet<{ clusters: FaceCluster[] }>('/api/clusters?kind=face'),
+    ])
+    visionStatus.value = status
+    faceClusters.value = res.clusters ?? []
+    if (activeFaceCluster.value) {
+      const stillThere = faceClusters.value.find((c) => c.id === activeFaceCluster.value!.id)
+      activeFaceCluster.value = stillThere ?? null
+    }
+  } catch (err) {
+    faceError.value = friendlyError(err)
+  } finally {
+    faceLoading.value = false
+  }
+}
+
+async function applyPersonName(): Promise<void> {
+  const cluster = activeFaceCluster.value
+  const name = personName.value.trim()
+  if (!cluster || !name || applyingFace.value) return
+  applyingFace.value = true
+  faceError.value = null
+  try {
+    await apiPost<{ updated: number }>('/api/tagging/apply', {
+      clusterId: cluster.id,
+      members: cluster.members,
+      // person: prefix keeps named faces distinguishable from content
+      // tags (object:dog, kind:photo, etc.) without a dedicated field.
+      tags: [`person:${name.toLowerCase()}`],
+    })
+    personName.value = ''
+    await refreshFaceClusters()
+  } catch (err) {
+    faceError.value = friendlyError(err)
+  } finally {
+    applyingFace.value = false
+  }
+}
+
+watch(mode, (next) => {
+  if (next === 'faces' && open.value) refreshFaceClusters()
+})
 
 const open = ref(false)
 const folders = ref<UntaggedFolder[]>([])
@@ -130,9 +199,37 @@ onUnmounted(() => {
         <button type="button" class="btn btn-ghost btn-sm btn-square ml-auto" @click="close" aria-label="Close">✕</button>
       </div>
 
-      <p class="border-b border-base-300 px-4 py-2 text-xs text-base-content/70">
+      <div role="tablist" class="tabs tabs-bordered px-4 pt-2">
+        <button
+          role="tab"
+          type="button"
+          class="tab"
+          :class="{ 'tab-active': mode === 'folders' }"
+          @click="mode = 'folders'"
+        >Folders</button>
+        <button
+          role="tab"
+          type="button"
+          class="tab"
+          :class="{ 'tab-active': mode === 'faces' }"
+          @click="mode = 'faces'"
+        >Faces</button>
+      </div>
+
+      <p v-if="mode === 'folders'" class="border-b border-base-300 px-4 py-2 text-xs text-base-content/70">
         Photos with no tags yet, grouped by folder. Select photos in a folder and apply one or more tags — work through a trip or shoot in one pass.
       </p>
+      <p v-else class="border-b border-base-300 px-4 py-2 text-xs text-base-content/70">
+        Face clusters found by kestrel-vision. Name each cluster once and every photo of that person gets a <code>person:&lt;name&gt;</code> tag — new photos at scan time inherit it automatically.
+      </p>
+
+      <div
+        v-if="mode === 'faces' && !visionOn"
+        class="alert alert-warning alert-soft rounded-none text-xs"
+        role="status"
+      >
+        kestrel-vision is not running, so no new face clusters will be discovered. Already-named people still filter correctly in the main grid.
+      </div>
 
       <div v-if="progress" class="flex flex-col gap-1 border-b border-base-300 px-4 py-2">
         <progress class="progress progress-primary h-1.5" :value="progressPct" max="100" />
@@ -146,9 +243,40 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div v-if="error" class="alert alert-error alert-soft rounded-none text-xs" role="alert">{{ error }}</div>
+      <div v-if="mode === 'folders' && error" class="alert alert-error alert-soft rounded-none text-xs" role="alert">{{ error }}</div>
+      <div v-if="mode === 'faces' && faceError" class="alert alert-error alert-soft rounded-none text-xs" role="alert">{{ faceError }}</div>
 
-      <div class="flex-1 min-h-0 overflow-y-auto">
+      <div v-if="mode === 'faces'" class="flex-1 min-h-0 overflow-y-auto">
+        <div v-if="faceLoading && faceClusters.length === 0" class="p-4 text-sm text-base-content/60">Loading face clusters…</div>
+        <div v-else-if="!faceLoading && faceClusters.length === 0" class="p-4 text-sm text-base-content/60">
+          No face clusters yet. Run a scan with kestrel-vision running to start finding people.
+        </div>
+        <ul v-else class="divide-y divide-base-300">
+          <li
+            v-for="c in faceClusters"
+            :key="c.id"
+            class="flex items-center gap-3 px-4 py-2 cursor-pointer"
+            :class="{ 'bg-base-200': activeFaceCluster?.id === c.id }"
+            @click="activeFaceCluster = c"
+          >
+            <img
+              class="h-16 w-16 shrink-0 rounded object-cover bg-base-300"
+              :src="thumbSrc(c.members[0])"
+              alt=""
+            />
+            <div class="flex-1 min-w-0">
+              <div class="font-mono text-xs truncate" :title="c.members[0]">{{ c.members[0] }}</div>
+              <div class="text-xs text-base-content/60 tabular-nums">
+                {{ c.size }} photo{{ c.size === 1 ? '' : 's' }}
+                <span v-if="c.untagged === 0" class="ml-2 badge badge-success badge-xs">named</span>
+                <span v-else class="ml-2 badge badge-ghost badge-xs">unnamed</span>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div v-else class="flex-1 min-h-0 overflow-y-auto">
         <div v-if="loading && folders.length === 0" class="p-4 text-sm text-base-content/60">Loading untagged photos…</div>
         <div v-else-if="!loading && folders.length === 0" class="p-4 text-sm text-base-content/60">Everything is tagged. Nice.</div>
         <ul v-else class="divide-y divide-base-300">
@@ -203,7 +331,34 @@ onUnmounted(() => {
         </ul>
       </div>
 
-      <div v-if="folders.length > 0" class="flex items-center gap-3 border-t border-base-300 px-4 py-3">
+      <div
+        v-if="mode === 'faces' && activeFaceCluster"
+        class="flex items-center gap-3 border-t border-base-300 px-4 py-3"
+      >
+        <div class="flex-1 text-xs text-base-content/70">
+          Naming cluster of <strong>{{ activeFaceCluster.size }}</strong> photos
+        </div>
+        <input
+          v-model="personName"
+          type="text"
+          class="input input-sm flex-1"
+          placeholder="Person name (e.g. alice)"
+          @keydown.enter="applyPersonName"
+        />
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          :disabled="applyingFace || !personName.trim()"
+          @click="applyPersonName"
+        >
+          {{ applyingFace ? 'Applying…' : 'Name this person' }}
+        </button>
+      </div>
+
+      <div
+        v-if="mode === 'folders' && folders.length > 0"
+        class="flex items-center gap-3 border-t border-base-300 px-4 py-3"
+      >
         <div class="flex items-center gap-1 text-sm tabular-nums min-w-28">
           <strong>{{ selected.size }}</strong> selected
           <button

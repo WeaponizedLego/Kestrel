@@ -46,4 +46,28 @@ type Photo struct {
 	// can also be zero in theory, but the probability is astronomical
 	// and the cluster package treats a hash of zero as absent.
 	PHash uint64
+
+	// Faces holds per-face detections produced by the optional
+	// kestrel-vision sidecar. Empty on photos the sidecar hasn't
+	// processed yet — and nil on pre-v3-era gob files until the next
+	// scan repopulates them (gob zero-fills absent fields, so no
+	// persistence version bump is required to add this field).
+	//
+	// Once written, Faces and the person:* tags derived from them
+	// survive in library_meta.gob even if the sidecar is later
+	// uninstalled, so filtering by named people keeps working.
+	Faces []FaceDetection
+}
+
+// FaceDetection is one recognised face on a photo. BBox is in pixel
+// coordinates of the original image; Embedding is an L2-normalised
+// identity vector so cosine similarity against another face is just
+// a dot product. PersonTag is the library-level user label (e.g.
+// "alice") applied when the user names a face cluster — empty until
+// the cluster is named.
+type FaceDetection struct {
+	BBox       [4]int
+	Embedding  []float32
+	Confidence float32
+	PersonTag  string
 }

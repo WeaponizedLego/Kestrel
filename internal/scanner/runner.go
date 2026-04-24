@@ -62,6 +62,11 @@ type RunnerConfig struct {
 	ThumbStore  ThumbStore
 	Thumbnailer Thumbnailer
 
+	// Detector is the optional vision sidecar client. Passing nil
+	// (or a client whose Available() returns false at scan time)
+	// disables detection without affecting the rest of the pipeline.
+	Detector Detector
+
 	// Autotag is passed through to each Scan as Options.Autotag.
 	// A zero value is safe: scanner-level autotag.Derive then emits
 	// the cheap subset (kind, year, camera, …).
@@ -84,6 +89,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 			Publisher:   cfg.Publisher,
 			ThumbStore:  cfg.ThumbStore,
 			Thumbnailer: cfg.Thumbnailer,
+			Detector:    cfg.Detector,
 			Autotag:     cfg.Autotag,
 		},
 		onFinish: cfg.OnFinish,

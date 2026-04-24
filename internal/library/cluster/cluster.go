@@ -32,6 +32,14 @@ const (
 	// Similar clusters capture looser visual groups — same subject,
 	// same framing, same scene — at the cost of more false positives.
 	Similar
+
+	// Face clusters group faces that look like the same person. The
+	// distance function is cosine distance over identity embeddings
+	// produced by the kestrel-vision sidecar (see internal/vision).
+	// Face data on photos survives even if the sidecar is later
+	// uninstalled, so clusters built on existing embeddings keep
+	// working offline.
+	Face
 )
 
 // Default thresholds live here as consts rather than knobs because
@@ -44,13 +52,30 @@ const (
 	ThresholdSimilar   = 12
 )
 
+// FaceCosineThreshold is the cosine-distance cap under which two
+// face embeddings are considered the same person. ArcFace-family
+// embeddings typically sit around cosine similarity 0.5–0.7 for the
+// same identity under varied lighting/pose, which translates to
+// cosine distance <= 0.4. Tuneable later via config; kept as a
+// plain const for v1 so docs and code share one number.
+const FaceCosineThreshold = 0.4
+
 // Threshold returns the Hamming-distance cap for the given kind.
 // Exported so callers (handlers, tests) don't duplicate the mapping.
+// Face clusters don't use a Hamming threshold — callers that want the
+// cosine cap should read FaceCosineThreshold directly.
 func Threshold(k Kind) int {
-	if k == Similar {
+	switch k {
+	case Similar:
 		return ThresholdSimilar
+	case Face:
+		// No meaningful integer threshold for cosine distance. Return
+		// 0 so API echoes can signal "not applicable" without adding a
+		// second type.
+		return 0
+	default:
+		return ThresholdDuplicate
 	}
-	return ThresholdDuplicate
 }
 
 // Cluster is one group of visually-related photos. Members are the
@@ -177,6 +202,7 @@ func (m *Manager) rebuildLocked() {
 
 	m.byKind[Duplicate] = buildClusters(entries, ThresholdDuplicate)
 	m.byKind[Similar] = buildClusters(entries, ThresholdSimilar)
+	m.byKind[Face] = buildFaceClusters(photos, FaceCosineThreshold)
 }
 
 // entry is the per-photo tuple the clustering algorithm consumes.
@@ -319,6 +345,157 @@ func (uf *unionFind) find(i int) int {
 		i = uf.parent[i]
 	}
 	return i
+}
+
+// faceEntry is the per-face tuple buildFaceClusters consumes. One
+// photo can contribute several entries when the sidecar detected
+// multiple faces on it. PersonTag carries through a previously-named
+// cluster so the per-cluster "Untagged" count is meaningful.
+type faceEntry struct {
+	path      string
+	embedding []float32
+	person    string
+}
+
+// buildFaceClusters runs union-find over face embeddings. Two faces
+// are unioned when their cosine distance is within threshold. The
+// returned cluster members are photo paths (deduplicated per
+// cluster), matching the shape of duplicate/similar clusters so the
+// API and UI don't need a second Cluster type.
+//
+// This is O(N²) in face count, which is acceptable for personal
+// libraries (tens of thousands of faces). Replacing with an LSH or
+// random-projection index is future work once we see a library size
+// that needs it.
+func buildFaceClusters(photos []*library.Photo, threshold float64) []Cluster {
+	var entries []faceEntry
+	for _, p := range photos {
+		for _, f := range p.Faces {
+			if len(f.Embedding) == 0 {
+				continue
+			}
+			entries = append(entries, faceEntry{
+				path:      p.Path,
+				embedding: f.Embedding,
+				person:    f.PersonTag,
+			})
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	uf := newUnionFind(len(entries))
+	for i := range entries {
+		for j := i + 1; j < len(entries); j++ {
+			if cosineDistance(entries[i].embedding, entries[j].embedding) <= threshold {
+				uf.union(i, j)
+			}
+		}
+	}
+
+	groups := make(map[int][]int)
+	for i := range entries {
+		root := uf.find(i)
+		groups[root] = append(groups[root], i)
+	}
+
+	clusters := make([]Cluster, 0, len(groups))
+	for root, members := range groups {
+		if len(members) < 2 {
+			continue
+		}
+		// Deduplicate paths: two faces in the same photo matching the
+		// same person count as one member for tag-application purposes.
+		seen := make(map[string]struct{}, len(members))
+		paths := make([]string, 0, len(members))
+		named := ""
+		for _, m := range members {
+			e := entries[m]
+			if _, dup := seen[e.path]; dup {
+				continue
+			}
+			seen[e.path] = struct{}{}
+			paths = append(paths, e.path)
+			if named == "" && e.person != "" {
+				named = e.person
+			}
+		}
+		if len(paths) < 2 {
+			continue
+		}
+		sort.Strings(paths)
+
+		untagged := len(paths)
+		if named != "" {
+			untagged = 0
+		}
+		clusters = append(clusters, Cluster{
+			ID:       faceClusterID(entries[root].embedding, paths[0]),
+			Members:  paths,
+			Size:     len(paths),
+			Untagged: untagged,
+		})
+	}
+
+	sort.Slice(clusters, func(i, j int) bool {
+		if clusters[i].Size != clusters[j].Size {
+			return clusters[i].Size > clusters[j].Size
+		}
+		return clusters[i].Members[0] < clusters[j].Members[0]
+	})
+	return clusters
+}
+
+// cosineDistance returns 1 - cosine similarity over two vectors.
+// Embeddings are expected to be L2-normalised by the sidecar; we
+// don't renormalise here because the sidecar is the authoritative
+// source and a malformed vector indicates a protocol bug the user
+// should see (via a small distance outlier) rather than be papered
+// over. Mismatched lengths return max distance (2.0) so the pair is
+// never unioned.
+func cosineDistance(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 2
+	}
+	var dot float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+	}
+	return 1 - dot
+}
+
+// faceClusterID folds the root embedding's first few dimensions
+// and the lexicographically-first member path into a short string.
+// Stable across rebuilds for the same cluster, the same way
+// clusterID is for pHash clusters.
+func faceClusterID(embedding []float32, firstPath string) string {
+	const hex = "0123456789abcdef"
+	var out [16 + 1 + 8]byte
+	// Fold first 16 dims into 64 bits of signal — any change to the
+	// cluster's root embedding will shift the prefix.
+	var folded uint64
+	for i := 0; i < 16 && i < len(embedding); i++ {
+		// Scale float to ~16 bits of dynamic range; embeddings are
+		// typically in [-1, 1]. Overflow is fine; the ID doesn't need
+		// to round-trip to the input.
+		folded = folded*1099511628211 + uint64(int32(embedding[i]*32768))
+	}
+	for i := 0; i < 16; i++ {
+		shift := uint((15 - i) * 4)
+		out[i] = hex[(folded>>shift)&0xF]
+	}
+	out[16] = '-'
+	var fnv uint32 = 2166136261
+	for i := 0; i < len(firstPath); i++ {
+		fnv ^= uint32(firstPath[i])
+		fnv *= 16777619
+	}
+	for i := 0; i < 8; i++ {
+		shift := uint((7 - i) * 4)
+		out[17+i] = hex[(fnv>>shift)&0xF]
+	}
+	return string(out[:])
 }
 
 func (uf *unionFind) union(a, b int) {

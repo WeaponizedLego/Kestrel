@@ -21,8 +21,11 @@ more productive than the last:
 3. **Tagging queue UX** — a dedicated view that surfaces the largest untagged clusters first
    and turns one click into N tags.
 
-A fourth layer — on-device semantic embeddings (CLIP-style) — is explicitly **out of scope
-for MVP**. See [Future Work](#future-work) below.
+A fourth layer — face recognition + object detection via the optional `kestrel-vision`
+sidecar — is implemented as an opt-in feature. See [Layer 4](#layer-4--face-recognition--object-detection-via-sidecar) below.
+
+A fifth layer — on-device semantic embeddings (CLIP-style) — remains **out of scope for
+MVP**. See [Future Work](#future-work) below.
 
 ---
 
@@ -193,6 +196,66 @@ confirming. Auto-tag chips render in a visually distinct style (per `visual-desi
 the user can see at a glance what was inferred vs. what they confirmed.
 
 ---
+
+## Layer 4 — Face Recognition & Object Detection (via sidecar)
+
+A fourth layer extends assisted tagging with face recognition (name a person once, Kestrel
+finds them in every other photo) and object/class detection (`object:dog`, `object:car`,
+…) emitted as auto-tags. The ML runs in a separate binary, `kestrel-vision`, so the core
+binary stays pure Go and cross-compiles cleanly from any host.
+
+### Shape
+
+- Sidecar lives in `cmd/kestrel-vision/`, ships alongside core in the same GitHub Release
+  as `kestrel-vision-<os>-<arch>`. It is **optional**: a user who doesn't download it sees
+  no loss of existing functionality.
+- Contract is tiny. Two endpoints in `internal/vision/protocol/`:
+  - `GET /healthz` → `{version, models[]}`
+  - `POST /detect` → `{faces: [{bbox, confidence, embedding}], objects: [{label, confidence, bbox}]}`
+- Core's `internal/vision/` client reads a handshake file (`vision.endpoint`) the sidecar
+  writes at startup, probes `/healthz` on a 5 s tick, and caches state for the UI.
+
+### Integration
+
+- `Photo.Faces []FaceDetection` holds bbox + L2-normalised 512-d identity embedding per
+  detected face. Persisted in `library_meta.gob` via gob's field-addition semantics (no
+  schema version bump needed).
+- Object labels route through `autotag.MergeAndNormalize` and land in `Photo.AutoTags` as
+  `object:<label>` — same pipeline, same normalisation, same UI rendering as every other
+  auto-tag.
+- `internal/library/cluster/` gains a third `Kind`: `Face`, clustered by cosine distance
+  over embeddings (threshold `FaceCosineThreshold = 0.4`). `/api/clusters?kind=face`
+  returns face clusters in the same shape as duplicate/similar.
+- Scanner consults `Detector.Available()` before dispatching; a missing or crashed sidecar
+  is silently skipped. The user's scan always completes.
+
+### Graceful degradation
+
+Two properties hold together:
+
+1. **Core runs without the sidecar.** Every scan path, API, and UI island tolerates
+   `Detector == nil || Available == false`. The only visible difference is the Faces tab
+   in the Tagging Queue dims with an informational banner and new photos don't get
+   `object:*` tags.
+2. **Results persist as plain tags.** Anything the sidecar emits (`person:alice`,
+   `object:dog`) lives in `Photo.AutoTags` or `Photo.Faces` in `library_meta.gob`. If the
+   user later uninstalls the sidecar, filtering by those tags keeps working forever.
+
+### UI
+
+- `StatusBar.vue` renders a daisyUI badge showing `vision: on | off | error`, polled from
+  `/api/vision/status` every 10 s. Click the badge to force an immediate re-probe.
+- `TaggingQueue.vue` gains a **Faces** tab listing face clusters largest-first. Clicking a
+  cluster lets the user name it — that applies `person:<name>` to every member in one
+  call via the existing `/api/tagging/apply` endpoint.
+
+### Future upgrade path
+
+The scaffold under `cmd/kestrel-vision/` accepts images and returns empty results. A
+follow-up PR wires ArcFace (face embeddings) and YOLOv8n (object classes) against a
+CGO-linked ONNX Runtime without changing the HTTP contract. The split build workflows
+(`_build.yml` stays pure-Go for core; `_build-vision.yml` owns the sidecar) mean the
+ONNX dependency can land in one place without affecting core distribution.
 
 ## Data Flow
 

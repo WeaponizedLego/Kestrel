@@ -117,17 +117,19 @@ func (h *TaggingHandler) listClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseClusterKind maps the ?kind= query value onto cluster.Kind.
-// Empty or "duplicate" → Duplicate; "similar" → Similar; anything
-// else is a bad request so callers get a clear 4xx rather than a
-// silently-default result.
+// Empty or "duplicate" → Duplicate; "similar" → Similar; "face" →
+// Face; anything else is a bad request so callers get a clear 4xx
+// rather than a silently-default result.
 func parseClusterKind(raw string) (cluster.Kind, error) {
 	switch raw {
 	case "", "duplicate":
 		return cluster.Duplicate, nil
 	case "similar":
 		return cluster.Similar, nil
+	case "face":
+		return cluster.Face, nil
 	default:
-		return 0, fmt.Errorf("kind must be duplicate or similar, got %q", raw)
+		return 0, fmt.Errorf("kind must be duplicate, similar, or face, got %q", raw)
 	}
 }
 
@@ -135,10 +137,14 @@ func parseClusterKind(raw string) (cluster.Kind, error) {
 // echo back which kind the response pertains to. Keeping it alongside
 // the parser documents the wire vocabulary as a single table.
 func clusterKindString(k cluster.Kind) string {
-	if k == cluster.Similar {
+	switch k {
+	case cluster.Similar:
 		return "similar"
+	case cluster.Face:
+		return "face"
+	default:
+		return "duplicate"
 	}
-	return "duplicate"
 }
 
 // applyRequest is the JSON body accepted by POST /api/tagging/apply.

@@ -224,6 +224,25 @@ func formatTag(prefix, value string) string {
 	return strings.TrimRight(out, "-")
 }
 
+// MergeAndNormalize folds additions into existing, preserving the
+// autotag output contract: lowercase, deduplicated, sorted, no empty
+// strings. Used by the scanner when extending a photo's AutoTags with
+// tags derived outside of Derive (e.g. object labels from the vision
+// sidecar) so the post-merge slice still looks like a Derive result.
+func MergeAndNormalize(existing, additions []string) []string {
+	if len(additions) == 0 && len(existing) == 0 {
+		return nil
+	}
+	set := newTagSet()
+	for _, t := range existing {
+		set.add(strings.ToLower(strings.TrimSpace(t)))
+	}
+	for _, t := range additions {
+		set.add(strings.ToLower(strings.TrimSpace(t)))
+	}
+	return set.sorted()
+}
+
 // tagSet collects and deduplicates tags while preserving the
 // lightweight contract Derive offers (sorted output, no empties).
 type tagSet struct {

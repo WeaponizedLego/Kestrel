@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onEvent } from '../transport/events'
 import { resyncing, resyncNotice } from '../transport/resync'
 import { undoToast, runUndoToast, clearUndoToast } from '../transport/undo'
+import { fetchVisionStatus, type VisionStatus } from '../transport/vision'
 
 interface ScanProgress { processed: number; total: number; root: string }
 interface ScanDone { added: number; cancelled: boolean; error?: string; intensity?: ScanIntensity }
@@ -80,6 +81,74 @@ function isErrorNotice(text: string | null): boolean {
   return !text.startsWith('Synced') && !text.startsWith('Library')
 }
 
+// Sidecar status: driven by /api/vision/status on a low-rate poll.
+// The badge is always visible so the user can tell at a glance
+// whether face/object detection is hooked in or not — the main
+// reason face clusters may or may not be available.
+const visionStatus = ref<VisionStatus | null>(null)
+const visionRefreshing = ref(false)
+let visionTimer: number | null = null
+
+// Poll cadence depends on what we're watching. When the sidecar is
+// idle or off, state rarely changes — a 10s tick is plenty. When
+// inFlight > 0 we want the counter to feel live, so poll faster.
+const visionPollIdle = 10_000
+const visionPollBusy = 1_500
+
+const visionBusy = computed(() => {
+  const s = visionStatus.value
+  return !!(s && s.state === 'on' && s.inFlight > 0)
+})
+
+const visionBadgeClass = computed(() => {
+  const state = visionStatus.value?.state
+  if (visionBusy.value) return 'badge-info'
+  if (state === 'on') return 'badge-success'
+  if (state === 'error') return 'badge-warning'
+  return 'badge-ghost'
+})
+
+const visionLabel = computed(() => {
+  const s = visionStatus.value
+  if (!s) return 'vision: …'
+  if (visionBusy.value) {
+    const n = s.inFlight
+    return n > 1 ? `vision: working (${n})` : 'vision: working'
+  }
+  if (s.state === 'on') return 'vision: on'
+  if (s.state === 'error') return 'vision: error'
+  return 'vision: off'
+})
+
+const visionTitle = computed(() => {
+  const s = visionStatus.value
+  if (!s) return 'kestrel-vision sidecar — status unknown'
+  if (s.state === 'on') {
+    const extras = [s.version, (s.models ?? []).join(', ')].filter(Boolean).join(' · ')
+    const base = extras ? `kestrel-vision — ${extras}` : 'kestrel-vision — connected'
+    const activity = visionBusy.value
+      ? `\nProcessing ${s.inFlight} image${s.inFlight === 1 ? '' : 's'} · ${s.detectCount.toLocaleString()} total`
+      : s.detectCount > 0
+        ? `\nIdle · ${s.detectCount.toLocaleString()} images processed`
+        : '\nIdle · waiting for a scan'
+    return base + activity
+  }
+  if (s.state === 'error') return `kestrel-vision — ${s.lastError || 'unreachable'}`
+  return 'kestrel-vision is not running. Click to re-check after starting the sidecar.'
+})
+
+async function refreshVisionStatus(force = false) {
+  try {
+    visionRefreshing.value = force
+    visionStatus.value = await fetchVisionStatus(force)
+  } catch {
+    // Endpoint missing or network hiccup: leave the previous state
+    // rather than flapping the badge.
+  } finally {
+    visionRefreshing.value = false
+  }
+}
+
 const unsubs: Array<() => void> = []
 
 onMounted(() => {
@@ -146,7 +215,27 @@ onMounted(() => {
   }))
 })
 
-onBeforeUnmount(() => { for (const u of unsubs) u() })
+// scheduleVisionTick re-arms the poll with an interval that depends
+// on whether the sidecar is currently busy. Called after each status
+// response so the cadence adapts without a separate watcher.
+function scheduleVisionTick() {
+  if (visionTimer !== null) window.clearTimeout(visionTimer)
+  const next = visionBusy.value ? visionPollBusy : visionPollIdle
+  visionTimer = window.setTimeout(async () => {
+    await refreshVisionStatus(false)
+    scheduleVisionTick()
+  }, next)
+}
+
+onMounted(async () => {
+  await refreshVisionStatus()
+  scheduleVisionTick()
+})
+
+onBeforeUnmount(() => {
+  for (const u of unsubs) u()
+  if (visionTimer !== null) window.clearTimeout(visionTimer)
+})
 </script>
 
 <template>
@@ -179,6 +268,15 @@ onBeforeUnmount(() => { for (const u of unsubs) u() })
     <span v-if="photoCount !== null" class="tabular-nums">
       {{ photoCount.toLocaleString() }}<span class="font-sans text-base-content/50">&nbsp;photos</span>
     </span>
+
+    <button
+      type="button"
+      class="badge badge-sm font-sans"
+      :class="[visionBadgeClass, (visionRefreshing || visionBusy) ? 'animate-pulse' : '']"
+      :title="visionTitle"
+      :aria-label="visionTitle"
+      @click="refreshVisionStatus(true)"
+    >{{ visionLabel }}</button>
 
     <div v-if="undoToast" class="alert alert-sm ml-2 py-1" role="status">
       <span class="truncate font-sans max-w-80">{{ undoToast.message }}</span>

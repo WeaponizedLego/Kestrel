@@ -58,6 +58,11 @@ type Config struct {
 	// the frontend falls back to its built-in defaults.
 	SettingsHandler *api.SettingsHandler
 
+	// VisionHandler reports kestrel-vision sidecar status. Optional:
+	// nil leaves the endpoint unregistered; the frontend treats the
+	// missing endpoint the same as a permanent "off" state.
+	VisionHandler *api.VisionHandler
+
 	// Theme returns the currently-persisted theme name. Used by the
 	// asset handler to inject a <meta name="kestrel-theme"> tag into
 	// index.html so the daisyUI theme is applied before any JS runs.
@@ -121,6 +126,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.SettingsHandler != nil {
 		cfg.SettingsHandler.Register(apiMux)
+	}
+	if cfg.VisionHandler != nil {
+		cfg.VisionHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, activityMiddleware(cfg.Activity, http.StripPrefix("/api", apiMux))))
 }

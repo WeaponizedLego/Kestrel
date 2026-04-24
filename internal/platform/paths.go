@@ -67,6 +67,15 @@ func TrashRootPath() (string, error) {
 	return appDataPath("trash")
 }
 
+// VisionEndpointPath returns the absolute path of the small JSON
+// handshake file the kestrel-vision sidecar writes at startup and
+// core reads to find the sidecar. The file lives next to the other
+// config-dir state so a crashed sidecar leaves a stale entry that
+// core detects via a health probe and treats as "sidecar unavailable".
+func VisionEndpointPath() (string, error) {
+	return appDataPath("vision.endpoint")
+}
+
 // appDataPath joins the per-user config directory with an app-owned
 // sub-path. Shared by LibraryMetaPath and any future config-dir files.
 func appDataPath(rel string) (string, error) {

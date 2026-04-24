@@ -18,9 +18,14 @@ jobs:
     with:
       retention-days: 90
 
+  build-vision:
+    uses: ./.github/workflows/_build-vision.yml
+    with:
+      retention-days: 90
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-vision]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -46,3 +51,8 @@ jobs:
             dist/kestrel-darwin-amd64
             dist/kestrel-darwin-arm64
             dist/kestrel-windows-amd64.exe
+            dist/kestrel-vision-linux-amd64
+            dist/kestrel-vision-linux-arm64
+            dist/kestrel-vision-darwin-amd64
+            dist/kestrel-vision-darwin-arm64
+            dist/kestrel-vision-windows-amd64.exe

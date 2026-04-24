@@ -33,6 +33,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/server"
 	"github.com/WeaponizedLego/kestrel/internal/settings"
 	"github.com/WeaponizedLego/kestrel/internal/thumbnail"
+	"github.com/WeaponizedLego/kestrel/internal/vision"
 	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
 
@@ -149,6 +150,20 @@ func run(devMode bool, bind string) error {
 	}
 	clusterMgr := cluster.NewManager(lib)
 
+	// Vision sidecar client. Optional feature: a missing or crashed
+	// kestrel-vision binary leaves the client in StateOff and every
+	// detection call short-circuits. The probe loop runs in the
+	// background so the UI badge reflects sidecar state without the
+	// scanner having to poll on its own.
+	visionEndpoint, err := platform.VisionEndpointPath()
+	if err != nil {
+		return fmt.Errorf("resolving vision endpoint path: %w", err)
+	}
+	visionClient := vision.NewClient(visionEndpoint)
+	visionCtx, stopVision := context.WithCancel(context.Background())
+	defer stopVision()
+	visionClient.Start(visionCtx)
+
 	// Video frame extraction shells out to ffmpeg when present;
 	// missing ffmpeg falls back to a placeholder thumbnail so the
 	// library remains identical across hosts that have it and don't.
@@ -164,6 +179,7 @@ func run(devMode bool, bind string) error {
 		Publisher:   hub,
 		ThumbStore:  pack,
 		Thumbnailer: thumbnail.NewMediaThumbnailer(videoProvider),
+		Detector:    visionClient,
 		Autotag:     autotagOpts,
 		// Flush metadata right after every scan — a cancelled scan
 		// loses nothing more than whatever failed to save before the
@@ -208,6 +224,7 @@ func run(devMode bool, bind string) error {
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
 	capabilitiesHandler := api.NewCapabilitiesHandler()
 	settingsHandler := api.NewSettingsHandler(settingsStore)
+	visionHandler := api.NewVisionHandler(visionClient)
 
 	// File operations: journal is write-ahead, trash is Kestrel-managed.
 	// Recovery runs before the HTTP server starts so any in-flight op
@@ -295,6 +312,7 @@ func run(devMode bool, bind string) error {
 		FileOpsHandler:      fileOpsHandler,
 		CapabilitiesHandler: capabilitiesHandler,
 		SettingsHandler:     settingsHandler,
+		VisionHandler:       visionHandler,
 		Theme:               func() string { return settingsStore.Get().Theme },
 		Hub:                 hub,
 		Activity:            activity,
