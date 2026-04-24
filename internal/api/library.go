@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,18 +63,110 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/tags/rename", h.renameTag)
 	mux.HandleFunc("/tags/merge", h.mergeTags)
 	mux.HandleFunc("/tags/delete", h.deleteTag)
+	mux.HandleFunc("/tags/hidden", h.setTagHidden)
 	mux.HandleFunc("/resync", h.resync)
+	mux.HandleFunc("/rescan", h.rescan)
 }
 
-// listTags responds to GET /api/tags/list with the full user-tag
-// vocabulary (name + per-tag photo count), sorted by name. AutoTags
-// are excluded on purpose — see Library.AllTags.
+// listTags responds to GET /api/tags/list with the user-tag vocabulary
+// (name + per-tag photo count + kind + hidden flag), sorted by name.
+//
+// Query params:
+//
+//	include_hidden=1 — also include user tags marked hidden.
+//	include_auto=1   — also include derived auto-tags (read-only in
+//	                   the UI: they regenerate on every scan).
+//
+// Both default off so the unopinionated call still returns the classic
+// "editable user vocabulary" list.
 func (h *LibraryHandler) listTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.lib.AllTags())
+	includeHidden := boolQuery(r.URL.Query().Get("include_hidden"))
+	includeAuto := boolQuery(r.URL.Query().Get("include_auto"))
+	writeJSON(w, http.StatusOK, h.lib.AllTagsFiltered(includeHidden, includeAuto))
+}
+
+// boolQuery accepts the common truthy spellings for a flag-style query
+// param. Anything else (including empty) reads as false.
+func boolQuery(raw string) bool {
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// setTagHiddenRequest is the JSON body for POST /api/tags/hidden.
+type setTagHiddenRequest struct {
+	Name   string `json:"name"`
+	Hidden bool   `json:"hidden"`
+}
+
+// setTagHidden responds to POST /api/tags/hidden by marking a user tag
+// hidden (or un-hiding it). Hidden is a Tag-Manager-visibility flag
+// only — photos still match searches on a hidden tag exactly as
+// before.
+//
+// Rejects two cases at the boundary:
+//   - the literal library.HiddenTag ("hidden"), which already has a
+//     fixed meaning elsewhere (photo suppression) and shouldn't be
+//     shadowed by a manager-visibility toggle;
+//   - auto-only tags (present as an AutoTag but not on any Photo.Tags),
+//     which regenerate every scan and aren't meaningful to persist.
+func (h *LibraryHandler) setTagHidden(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req setTagHiddenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	norm := strings.ToLower(strings.TrimSpace(req.Name))
+	if norm == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if norm == library.HiddenTag {
+		writeError(w, http.StatusBadRequest,
+			`"hidden" is reserved for photo suppression and cannot be toggled here`)
+		return
+	}
+	if req.Hidden && !tagExistsOnUserTags(h.lib, norm) {
+		writeError(w, http.StatusBadRequest, "only user tags can be hidden")
+		return
+	}
+	if err := h.lib.SetTagHidden(norm, req.Hidden); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.publisher != nil {
+		h.publisher.Publish("library:updated", map[string]any{
+			"hidden-tag": norm,
+			"hidden":     req.Hidden,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":   norm,
+		"hidden": req.Hidden,
+	})
+}
+
+// tagExistsOnUserTags reports whether any photo carries name as a
+// user tag. Used to reject "hide this auto-only tag" requests — the
+// user can still hide an auto-tag name by first adding it to at least
+// one photo as a real user tag, which is the intended escape hatch.
+func tagExistsOnUserTags(lib *library.Library, name string) bool {
+	for _, stat := range lib.AllTagsFiltered(true, false) {
+		if stat.Kind == library.TagKindUser && stat.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // renameTagRequest is the JSON body for POST /api/tags/rename. Both
@@ -530,6 +623,11 @@ func parentPath(path string) string {
 // The photo must already be in the library — otherwise we'd happily
 // serve any file the binary can read, which is a traversal foot-gun
 // even behind the loopback token gate.
+//
+// http.ServeFile already handles HTTP Range requests, which the
+// browser <video> element relies on to seek — no extra plumbing
+// needed beyond hinting Content-Type so the browser picks the right
+// decoder before bytes start streaming.
 func (h *LibraryHandler) servePhoto(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
@@ -544,8 +642,32 @@ func (h *LibraryHandler) servePhoto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "photo not in library")
 		return
 	}
+	if ct := mediaContentType(path); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	http.ServeFile(w, r, path)
+}
+
+// mediaContentType returns the MIME type Kestrel wants attached to a
+// served file, or "" to defer to net/http's own sniffing. Video types
+// are pinned explicitly because http.ServeFile's sniffer can produce
+// "application/octet-stream" for less common containers (e.g. .mkv),
+// which the browser then refuses to play.
+func mediaContentType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".webm":
+		return "video/webm"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".avi":
+		return "video/x-msvideo"
+	}
+	return ""
 }
 
 // listPhotos responds to GET /api/photos with a JSON array of every
@@ -631,9 +753,12 @@ func photoHasTag(p *library.Photo, tag string) bool {
 
 // filterByTokens whitelists photos whose tokens match. Each token
 // matches a photo when either (a) the photo has an exact tag equal to
-// the token, or (b) the token is a case-insensitive substring of the
-// photo's Name. matchAny=true means any one token is enough; false
-// means every token must match.
+// the token in either Tags or AutoTags, or (b) the token is a
+// case-insensitive substring of the photo's Name. AutoTags are
+// included so users can search the inferred attributes (kind:video,
+// camera:canon, year:2024, …) the same way they search user tags.
+// matchAny=true means any one token is enough; false means every
+// token must match.
 func filterByTokens(photos []*library.Photo, tokens []string, matchAny bool) []*library.Photo {
 	if len(tokens) == 0 {
 		return photos
@@ -641,12 +766,29 @@ func filterByTokens(photos []*library.Photo, tokens []string, matchAny bool) []*
 	out := make([]*library.Photo, 0, len(photos))
 	for _, p := range photos {
 		name := strings.ToLower(p.Name)
-		tags := tagSet(p.Tags)
+		tags := tagSetFor(p)
 		if matchesTokens(tokens, name, tags, matchAny) {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// tagSetFor returns a lookup set combining the photo's user Tags and
+// AutoTags. Both slices are stored normalized by their producers, so
+// no extra work is needed here.
+func tagSetFor(p *library.Photo) map[string]struct{} {
+	if len(p.Tags) == 0 && len(p.AutoTags) == 0 {
+		return nil
+	}
+	s := make(map[string]struct{}, len(p.Tags)+len(p.AutoTags))
+	for _, t := range p.Tags {
+		s[t] = struct{}{}
+	}
+	for _, t := range p.AutoTags {
+		s[t] = struct{}{}
+	}
+	return s
 }
 
 // tokenizeQuery splits q on whitespace and lowercases each token,
@@ -787,11 +929,14 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Record this folder as a watched root so the background
-	// rescanner keeps it in sync with disk going forward. Failure
-	// here must not block the scan itself — the user's immediate
-	// action succeeds, and they can retry the upsert via a second
-	// scan if the disk write was transient.
-	if h.roots != nil {
+	// rescanner keeps it in sync with disk going forward. Skip the
+	// upsert when the folder already sits inside an existing root —
+	// the scheduler will cover it via the parent, and littering
+	// watchroots.json with nested subtrees just slows every cycle
+	// down. Failure during a legitimate upsert must not block the
+	// scan itself — the user's immediate action succeeds, and they
+	// can retry via a second scan if the disk write was transient.
+	if h.roots != nil && !h.isCoveredByExistingRoot(req.Folder) {
 		if err := h.roots.Upsert(req.Folder); err != nil {
 			// Logged at the handler layer rather than returned so a
 			// read-only home dir or similar never breaks scanning.
@@ -802,6 +947,159 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusAccepted, scanResponse{ID: id, Root: req.Folder})
+}
+
+// isCoveredByExistingRoot reports whether folder is equal to, or a
+// descendant of, any currently-watched root. Used by the scan handler
+// to avoid registering sub-paths (e.g. /Photos/2025 when /Photos is
+// already watched) as separate roots.
+func (h *LibraryHandler) isCoveredByExistingRoot(folder string) bool {
+	if h.roots == nil || folder == "" {
+		return false
+	}
+	sep := string(filepath.Separator)
+	clean := filepath.Clean(folder)
+	target := strings.TrimRight(clean, sep) + sep
+	for _, r := range h.roots.List() {
+		root := strings.TrimRight(filepath.Clean(r.Path), sep) + sep
+		if strings.HasPrefix(target, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// rescanRequest is the JSON body accepted by POST /api/rescan. An
+// empty Folder means "sweep every watched root"; a non-empty Folder
+// scopes the rescan to that subtree.
+type rescanRequest struct {
+	Folder string `json:"folder"`
+}
+
+// rescanResponse is returned synchronously from POST /api/rescan. The
+// sweep itself runs asynchronously; clients observe progress via the
+// existing scan:* events and a trailing rescan:done when every root
+// in the plan has finished.
+type rescanResponse struct {
+	Roots []string `json:"roots"`
+}
+
+// rescan responds to POST /api/rescan. Unlike /api/scan, which walks
+// one folder and registers it as a watch root, /api/rescan is the
+// "keep me in sync with disk" button: walk the selected folder (or
+// every watched root when none is selected) at normal intensity,
+// then prune entries under that subtree whose files are gone.
+//
+// A normal-intensity scan already preempts any low-intensity
+// background rescan, so this is the "high priority" variant of the
+// scheduler's own loop.
+func (h *LibraryHandler) rescan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req rescanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	// Refuse when a normal (user-triggered) scan is already running.
+	// A low-intensity background run would just get preempted by the
+	// first Start below, so we let that through.
+	if activeID, activeRoot, intensity := h.runner.ActiveDetail(); activeID != "" && intensity == scanner.IntensityNormal {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":       scanner.ErrScanInProgress.Error(),
+			"active_id":   activeID,
+			"active_root": activeRoot,
+		})
+		return
+	}
+
+	roots := h.rescanPlan(req.Folder)
+	if len(roots) == 0 {
+		writeJSON(w, http.StatusOK, rescanResponse{Roots: []string{}})
+		return
+	}
+
+	go h.runRescan(roots)
+	writeJSON(w, http.StatusAccepted, rescanResponse{Roots: roots})
+}
+
+// rescanPlan resolves the request's Folder into the ordered list of
+// roots to scan. An explicit folder is scanned alone; an empty folder
+// expands to every currently-watched root.
+func (h *LibraryHandler) rescanPlan(folder string) []string {
+	if folder != "" {
+		return []string{folder}
+	}
+	if h.roots == nil {
+		return nil
+	}
+	list := h.roots.List()
+	out := make([]string, 0, len(list))
+	for _, r := range list {
+		out = append(out, r.Path)
+	}
+	return out
+}
+
+// runRescan is the goroutine body for POST /api/rescan. It walks each
+// root sequentially via runner.Start (waiting for each to finish
+// before starting the next) and runs a scoped PruneMissingUnder after
+// the walk so deleted files disappear from the library. Totals are
+// summarised in a trailing rescan:done event.
+func (h *LibraryHandler) runRescan(roots []string) {
+	var pruned int
+	completed := 0
+	total := len(roots)
+	for i, root := range roots {
+		h.publishRescanProgress(i+1, total, root, "scan")
+		if _, err := h.runner.Start(root); err != nil {
+			// Another user scan raced in between the initial check
+			// and here: stop the sweep. The scan:started/done
+			// stream from the other run keeps the UI honest; we
+			// just don't add to it.
+			break
+		}
+		h.runner.WaitForActive()
+
+		h.publishRescanProgress(i+1, total, root, "prune")
+		missing := h.lib.PruneMissingUnder(root, fileExists)
+		if len(missing) > 0 {
+			pruned += len(missing)
+			if h.publisher != nil {
+				h.publisher.Publish("library:updated", map[string]any{
+					"pruned": len(missing),
+					"root":   root,
+				})
+			}
+		}
+		completed++
+	}
+	if h.publisher != nil {
+		h.publisher.Publish("rescan:done", map[string]any{
+			"roots":     completed,
+			"pruned":    pruned,
+			"requested": len(roots),
+		})
+	}
+}
+
+// publishRescanProgress annotates the running rescan with its current
+// root, so the UI can show "folder i of N — <phase>" alongside the
+// underlying scan:progress stream. phase is "scan" before runner.Start
+// for a root and "prune" just before PruneMissingUnder.
+func (h *LibraryHandler) publishRescanProgress(index, total int, root, phase string) {
+	if h.publisher == nil {
+		return
+	}
+	h.publisher.Publish("rescan:progress", map[string]any{
+		"root_index":   index,
+		"root_total":   total,
+		"current_root": root,
+		"phase":        phase,
+	})
 }
 
 // watchedRoots handles GET (list) and DELETE (remove) of watched

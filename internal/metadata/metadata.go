@@ -54,7 +54,14 @@ type Metadata struct {
 // Extract opens path and returns its dimensions plus a best-effort EXIF
 // snapshot. Returns an error only when the file cannot be opened or the
 // image header cannot be decoded — EXIF problems are silently absorbed.
+//
+// For video files the call delegates to ffprobe (when available); a
+// missing ffprobe yields a zero Metadata rather than an error so the
+// scanner still indexes the file.
 func Extract(path string) (Metadata, error) {
+	if isVideoPath(path) {
+		return extractVideoMetadata(path), nil
+	}
 	dims, err := readDimensions(path)
 	if err != nil {
 		return Metadata{}, err

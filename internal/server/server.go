@@ -48,6 +48,11 @@ type Config struct {
 	// destructive endpoints. Optional: nil disables file operations.
 	FileOpsHandler *api.FileOpsHandler
 
+	// CapabilitiesHandler reports host-tool availability (ffmpeg /
+	// ffprobe). Optional: passing nil hides the endpoint and the
+	// frontend treats every capability as false.
+	CapabilitiesHandler *api.CapabilitiesHandler
+
 	// Hub fans events out to /ws subscribers. Required.
 	Hub *Hub
 
@@ -98,6 +103,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.FileOpsHandler != nil {
 		cfg.FileOpsHandler.Register(apiMux)
+	}
+	if cfg.CapabilitiesHandler != nil {
+		cfg.CapabilitiesHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, activityMiddleware(cfg.Activity, http.StripPrefix("/api", apiMux))))
 }

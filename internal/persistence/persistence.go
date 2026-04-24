@@ -34,7 +34,10 @@ const magic = "KSTL"
 // v2: adds AutoTags []string and PHash uint64 (see assisted tagging).
 //     v1 payloads are forward-compatible because gob zero-fills absent
 //     fields, so Load accepts both versions; next Save rewrites as v2.
-const CurrentVersion uint32 = 2
+// v3: appends a []string of hidden tag names (library-level, not per
+//     photo). v1/v2 payloads load cleanly with an empty hidden set;
+//     next Save rewrites as v3.
+const CurrentVersion uint32 = 3
 
 // header is the first gob-encoded value in every metadata file. Kept
 // deliberately small so a future migration can read it without
@@ -62,10 +65,11 @@ func isSupportedVersion(v uint32) bool {
 	return v >= 1 && v <= CurrentVersion
 }
 
-// Save writes photos to path atomically: it encodes to a sibling
-// "<path>.tmp" file first, fsyncs, then renames over the destination.
-// That way a crash mid-write leaves the previous good file untouched.
-func Save(path string, photos []*library.Photo) error {
+// Save writes photos and the hidden-tag set to path atomically: it
+// encodes to a sibling "<path>.tmp" file first, fsyncs, then renames
+// over the destination. That way a crash mid-write leaves the
+// previous good file untouched.
+func Save(path string, photos []*library.Photo, hiddenTags []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating metadata dir for %s: %w", path, err)
 	}
@@ -87,6 +91,16 @@ func Save(path string, photos []*library.Photo) error {
 		f.Close()
 		return fmt.Errorf("encoding photos to %s: %w", tmp, err)
 	}
+	// Hidden tags land in a separate gob value so older binaries
+	// (which stop after the photo slice) don't trip on it. Always
+	// written — even as an empty slice — so the v3 shape is uniform.
+	if hiddenTags == nil {
+		hiddenTags = []string{}
+	}
+	if err := enc.Encode(hiddenTags); err != nil {
+		f.Close()
+		return fmt.Errorf("encoding hidden tags to %s: %w", tmp, err)
+	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return fmt.Errorf("flushing %s: %w", tmp, err)
@@ -100,17 +114,19 @@ func Save(path string, photos []*library.Photo) error {
 	return nil
 }
 
-// Load reads photos from path. A missing file is not an error — it
-// returns (nil, nil) so a first-run binary can carry on with an empty
-// library. A present-but-corrupt file or a version mismatch returns a
-// wrapped error; the caller decides whether to keep going or abort.
-func Load(path string) ([]*library.Photo, error) {
+// Load reads photos and hidden tags from path. A missing file is not
+// an error — it returns (nil, nil, nil) so a first-run binary can
+// carry on with an empty library. A present-but-corrupt file or a
+// version mismatch returns a wrapped error; the caller decides
+// whether to keep going or abort. v1/v2 payloads decode with an empty
+// hidden-tag slice (the field didn't exist yet).
+func Load(path string) ([]*library.Photo, []string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("opening %s: %w", path, err)
+		return nil, nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -118,19 +134,26 @@ func Load(path string) ([]*library.Photo, error) {
 
 	var h header
 	if err := dec.Decode(&h); err != nil {
-		return nil, fmt.Errorf("decoding header from %s: %w", path, err)
+		return nil, nil, fmt.Errorf("decoding header from %s: %w", path, err)
 	}
 	if h.Magic != magic {
-		return nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
+		return nil, nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
 	}
 	if !isSupportedVersion(h.Version) {
-		return nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
+		return nil, nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
 			path, h.Version, CurrentVersion, ErrUnknownVersion)
 	}
 
 	var photos []*library.Photo
 	if err := dec.Decode(&photos); err != nil {
-		return nil, fmt.Errorf("decoding photos from %s: %w", path, err)
+		return nil, nil, fmt.Errorf("decoding photos from %s: %w", path, err)
 	}
-	return photos, nil
+
+	var hidden []string
+	if h.Version >= 3 {
+		if err := dec.Decode(&hidden); err != nil {
+			return nil, nil, fmt.Errorf("decoding hidden tags from %s: %w", path, err)
+		}
+	}
+	return photos, hidden, nil
 }

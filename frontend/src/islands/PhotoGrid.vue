@@ -26,6 +26,7 @@ import {
 import { resyncing, runResync } from '../transport/resync'
 import { requestedSearchTokens } from '../transport/search'
 import type { Photo } from '../types'
+import { isVideo } from '../util/media'
 
 // Lazy-loaded so the viewer JS/CSS only downloads when a user opens
 // a photo — matches TASKS.md Phase 8 "PhotoViewer lazy-loaded via
@@ -749,10 +750,10 @@ watch(cellSize, (_newSize, oldSize) => {
           type="button"
           class="btn btn-sm btn-ghost"
           :disabled="resyncing || scanning"
-          title="Check disk for deleted photos and drop missing entries"
+          title="Re-scan the selected folder (or every watched root) for new, changed, and deleted files"
           @click="runResync"
         >
-          {{ resyncing ? 'Syncing…' : 'Re-sync' }}
+          {{ resyncing ? 'Re-scanning…' : 'Re-scan' }}
         </button>
       </div>
 
@@ -862,6 +863,15 @@ watch(cellSize, (_newSize, oldSize) => {
               loading="lazy"
               decoding="async"
             />
+            <span
+              v-if="isVideo(cell.photo)"
+              class="photo-grid__video-badge"
+              aria-label="Video"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M4 3 L11 7 L4 11 Z" fill="currentColor" />
+              </svg>
+            </span>
           </button>
           <div
             v-if="marqueeBox"
@@ -942,5 +952,19 @@ watch(cellSize, (_newSize, oldSize) => {
 }
 .photo-grid__cell--selected::after {
   box-shadow: inset 0 0 0 2px oklch(var(--p) / 1);
+}
+.photo-grid__video-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
 }
 </style>

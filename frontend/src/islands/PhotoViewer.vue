@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiPost, friendlyError, photoSrc } from '../transport/api'
+import { useCapabilities } from '../transport/capabilities'
 import type { Photo } from '../types'
+import { isVideo } from '../util/media'
 
 const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
+const LightboxModal = defineAsyncComponent(() => import('../components/LightboxModal.vue'))
 
 const props = defineProps<{ photo: Photo }>()
 const emit = defineEmits<{
@@ -13,6 +16,8 @@ const emit = defineEmits<{
 }>()
 
 const src = computed(() => photoSrc(props.photo.Path))
+const video = computed(() => isVideo(props.photo))
+const capabilities = useCapabilities()
 
 const dims = computed(() =>
   props.photo.Width && props.photo.Height
@@ -36,7 +41,10 @@ function formatDate(raw: string | undefined): string {
   return isNaN(d.getTime()) ? '—' : d.toLocaleString()
 }
 
+const previewOpen = ref(false)
+
 function onKey(e: KeyboardEvent) {
+  if (previewOpen.value) return
   switch (e.key) {
     case 'Escape': emit('close'); break
     case 'ArrowLeft': emit('prev'); break
@@ -133,10 +141,30 @@ async function commitTags(next: string[]) {
     </div>
 
     <div class="flex max-h-[40vh] min-h-48 items-center justify-center border-b border-base-300 bg-base-300/30 p-4">
-      <img :src="src" :alt="photo.Name" class="max-h-full max-w-full object-contain rounded" />
+      <video
+        v-if="video"
+        :src="src"
+        controls
+        preload="metadata"
+        class="max-h-full max-w-full rounded"
+      />
+      <img
+        v-else
+        :src="src"
+        :alt="photo.Name"
+        class="max-h-full max-w-full object-contain rounded"
+      />
     </div>
 
-    <div class="flex flex-col gap-2 px-4 pt-3 pb-2">
+    <div
+      v-if="video && !capabilities.ffmpeg"
+      role="alert"
+      class="alert alert-warning alert-soft mx-4 mt-3 text-xs"
+    >
+      ffmpeg not installed — thumbnails for videos are placeholders. Install ffmpeg and rescan to generate real previews.
+    </div>
+
+    <div v-if="!video" class="flex flex-col gap-2 px-4 pt-3 pb-2">
       <button
         type="button"
         :class="[
@@ -163,6 +191,7 @@ async function commitTags(next: string[]) {
     </div>
 
     <div class="flex flex-col gap-2 px-4 pb-3">
+      <button type="button" class="btn btn-sm btn-outline" @click="previewOpen = true">Preview</button>
       <button type="button" class="btn btn-sm btn-outline" @click="revealInFolder">Show in folder</button>
       <p v-if="revealError" class="text-error text-xs" role="alert">{{ revealError }}</p>
     </div>
@@ -204,5 +233,7 @@ async function commitTags(next: string[]) {
       />
       <p v-if="tagError" class="text-error text-xs mt-1" role="alert">{{ tagError }}</p>
     </section>
+
+    <LightboxModal v-if="previewOpen" :photo="photo" @close="previewOpen = false" />
   </aside>
 </template>

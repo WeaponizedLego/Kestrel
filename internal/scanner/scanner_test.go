@@ -41,7 +41,7 @@ func TestScan_FindsSupportedImages(t *testing.T) {
 		t.Fatalf("library has %d photos, want %d", got, want)
 	}
 	for _, p := range photos {
-		if !isSupportedImage(p.Path) {
+		if !isSupportedMedia(p.Path) {
 			t.Errorf("Scan returned unsupported file: %s", p.Path)
 		}
 		if p.Name == "" {
@@ -118,6 +118,51 @@ func TestScan_IsAdditiveAcrossRoots(t *testing.T) {
 	}
 }
 
+func TestScan_ProgressTotalKnownBeforeTerminalEvent(t *testing.T) {
+	// With a pool of workers draining the walker's channel, enumeration
+	// finishes long before processing does on trees of any realistic
+	// size. The scanner must publish at least one progress event whose
+	// Total is the final discovered count *before* the terminal
+	// Processed==Total emission — that's what lets the UI show a real
+	// progress bar mid-scan instead of only at 100%.
+	const fileCount = progressEvery * 3 // guarantees several batched emissions
+
+	root := t.TempDir()
+	names := make([]string, fileCount)
+	for i := range names {
+		names[i] = fmt.Sprintf("img%03d.jpg", i)
+	}
+	writeImageTree(t, root, names)
+
+	pub := &recordingPublisher{}
+	lib := library.New()
+	if _, err := Scan(context.Background(), root, lib, Options{Publisher: pub}); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	events := pub.byKind("scan:progress")
+	if len(events) < 2 {
+		t.Fatalf("got %d scan:progress events, want at least 2", len(events))
+	}
+
+	var sawKnownTotal bool
+	for _, e := range events[:len(events)-1] {
+		p, ok := e.Payload.(Progress)
+		if !ok {
+			t.Fatalf("progress payload is %T, want Progress", e.Payload)
+		}
+		if p.Total > 0 && p.Processed < p.Total {
+			sawKnownTotal = true
+			if p.Total != fileCount {
+				t.Errorf("progress Total = %d, want %d", p.Total, fileCount)
+			}
+		}
+	}
+	if !sawKnownTotal {
+		t.Fatalf("no mid-scan progress event carried a known Total; walker completion not propagated")
+	}
+}
+
 func TestScan_MissingRoot(t *testing.T) {
 	_, err := Scan(context.Background(), filepath.Join(t.TempDir(), "nope"), library.New(), Options{})
 	if err == nil {
@@ -143,7 +188,7 @@ func TestScan_RespectsCancellation(t *testing.T) {
 	}
 }
 
-func TestIsSupportedImage(t *testing.T) {
+func TestIsSupportedMedia(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
@@ -153,13 +198,16 @@ func TestIsSupportedImage(t *testing.T) {
 		{"uppercase JPEG", "/x/a.JPEG", true},
 		{"png", "/x/a.png", true},
 		{"webp", "/x/a.webp", true},
+		{"mp4", "/x/clip.mp4", true},
+		{"uppercase MOV", "/x/clip.MOV", true},
+		{"mkv", "/x/clip.mkv", true},
 		{"unsupported", "/x/a.txt", false},
 		{"no extension", "/x/a", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isSupportedImage(tt.path); got != tt.want {
-				t.Errorf("isSupportedImage(%q) = %v, want %v", tt.path, got, tt.want)
+			if got := isSupportedMedia(tt.path); got != tt.want {
+				t.Errorf("isSupportedMedia(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
 	}

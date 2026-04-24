@@ -52,6 +52,13 @@ type Library struct {
 	mu     sync.RWMutex
 	photos map[string]*Photo
 
+	// hiddenTags holds user-tag names the user has marked as "hide from
+	// the Tag Manager overview". Search/filter behaviour is unaffected —
+	// this is purely a UI-visibility flag. Storing it library-level (not
+	// per photo) matches the semantic: hiding applies to the tag name
+	// across the whole library, not to individual photos.
+	hiddenTags map[string]struct{}
+
 	byName []*Photo
 	byDate []*Photo
 	bySize []*Photo
@@ -61,7 +68,8 @@ type Library struct {
 // New returns an empty Library ready for concurrent use.
 func New() *Library {
 	return &Library{
-		photos: make(map[string]*Photo),
+		photos:     make(map[string]*Photo),
+		hiddenTags: make(map[string]struct{}),
 	}
 }
 
@@ -358,32 +366,179 @@ func (l *Library) UntaggedByFolder() []FolderBucket {
 }
 
 // TagStat describes one tag and how many photos currently carry it.
-// Only user tags (Photo.Tags) are counted; AutoTags are derived on
-// every scan and shouldn't be shown as editable vocabulary.
+// Kind is "user" for tags in Photo.Tags and "auto" for tags derived
+// from metadata (Photo.AutoTags). Hidden reports whether a user tag
+// has been marked "hide from the Tag Manager list" — it has no effect
+// on search or filtering. Auto-tags always report Hidden=false because
+// they can't be toggled.
 type TagStat struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
+	Name   string `json:"name"`
+	Count  int    `json:"count"`
+	Kind   string `json:"kind"`
+	Hidden bool   `json:"hidden"`
 }
 
-// AllTags returns every distinct user tag and its photo count, sorted
-// by name. AutoTags are intentionally excluded — they regenerate on
-// every scan, so letting the user rename or delete them would be a
-// footgun. Hidden tag is included so the user can see and manage it.
+// TagKind constants for TagStat.Kind. Kept as exported consts so
+// handlers and tests share a single source of truth for the wire values.
+const (
+	TagKindUser = "user"
+	TagKindAuto = "auto"
+)
+
+// AllTags returns every distinct user tag (minus any marked hidden)
+// and its photo count, sorted by name. Kept for backward compatibility
+// with the default Tag Manager view; richer callers should use
+// AllTagsFiltered.
 func (l *Library) AllTags() []TagStat {
+	return l.AllTagsFiltered(false, false)
+}
+
+// AllTagsFiltered enumerates tags with explicit control over which
+// kinds to include. Semantics:
+//
+//   - includeHidden=false, includeAuto=false (default Tag Manager
+//     view): user tags that are *not* marked hidden.
+//   - includeHidden=true,  includeAuto=false: every user tag (with
+//     its Hidden flag set truthfully).
+//   - includeHidden=true,  includeAuto=true:  user tags plus auto-tags
+//     (Kind="auto", Hidden=false). Auto-tags are read-only in the UI.
+//
+// A hidden user tag that has no photos carrying it still appears in
+// the list when includeHidden is true, so the user can un-hide a tag
+// that exists only as a saved preference.
+func (l *Library) AllTagsFiltered(includeHidden, includeAuto bool) []TagStat {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	counts := make(map[string]int)
+
+	userCounts := make(map[string]int)
 	for _, p := range l.photos {
 		for _, t := range p.Tags {
-			counts[t]++
+			userCounts[t]++
 		}
 	}
-	out := make([]TagStat, 0, len(counts))
-	for name, count := range counts {
-		out = append(out, TagStat{Name: name, Count: count})
+
+	out := make([]TagStat, 0, len(userCounts)+len(l.hiddenTags))
+	for name, count := range userCounts {
+		_, hidden := l.hiddenTags[name]
+		if hidden && !includeHidden {
+			continue
+		}
+		out = append(out, TagStat{
+			Name:   name,
+			Count:  count,
+			Kind:   TagKindUser,
+			Hidden: hidden,
+		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// Surface hidden tags with zero photos so the user can still
+	// un-hide them — otherwise a tag deleted from all photos becomes
+	// invisible and un-recoverable from the UI.
+	if includeHidden {
+		for name := range l.hiddenTags {
+			if _, seen := userCounts[name]; seen {
+				continue
+			}
+			out = append(out, TagStat{
+				Name:   name,
+				Count:  0,
+				Kind:   TagKindUser,
+				Hidden: true,
+			})
+		}
+	}
+
+	if includeAuto {
+		autoCounts := make(map[string]int)
+		for _, p := range l.photos {
+			for _, t := range p.AutoTags {
+				autoCounts[t]++
+			}
+		}
+		for name, count := range autoCounts {
+			out = append(out, TagStat{
+				Name:   name,
+				Count:  count,
+				Kind:   TagKindAuto,
+				Hidden: false,
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		// Deterministic tie-break when the same name exists as both
+		// user and auto (e.g. a folder name also added as a user tag):
+		// user first so it's the editable row.
+		return out[i].Kind < out[j].Kind
+	})
 	return out
+}
+
+// SetTagHidden marks name as hidden (or un-hides it when hidden is
+// false). Name is normalized before storage so callers can pass raw
+// user input. Auto-tags cannot be hidden via this method — the handler
+// layer rejects those requests; the library itself trusts its input
+// and only validates that the name is non-empty.
+func (l *Library) SetTagHidden(name string, hidden bool) error {
+	norm := normalizeOne(name)
+	if norm == "" {
+		return fmt.Errorf("hiding tag: name is required")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if hidden {
+		l.hiddenTags[norm] = struct{}{}
+	} else {
+		delete(l.hiddenTags, norm)
+	}
+	return nil
+}
+
+// IsTagHidden reports whether the named tag is marked hidden. Name is
+// normalized before lookup.
+func (l *Library) IsTagHidden(name string) bool {
+	norm := normalizeOne(name)
+	if norm == "" {
+		return false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	_, ok := l.hiddenTags[norm]
+	return ok
+}
+
+// HiddenTagSnapshot returns a sorted copy of the hidden-tag names.
+// Used by persistence to serialise the set without leaking the
+// internal map to callers who might mutate it.
+func (l *Library) HiddenTagSnapshot() []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]string, 0, len(l.hiddenTags))
+	for name := range l.hiddenTags {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LoadHiddenTags replaces the hidden-tag set with names. Inputs are
+// normalized on the way in so a hand-edited persistence file with
+// stray whitespace still loads cleanly. Called once at startup from
+// the persistence loader.
+func (l *Library) LoadHiddenTags(names []string) {
+	next := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		norm := normalizeOne(n)
+		if norm == "" {
+			continue
+		}
+		next[norm] = struct{}{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.hiddenTags = next
 }
 
 // RenameTag replaces every occurrence of old with new across the
@@ -414,6 +569,14 @@ func (l *Library) RenameTag(old, next string) (renamed, absorbed int, err error)
 			absorbed++
 		}
 	}
+	// Rename carries the hidden flag across so the user's preference
+	// survives a spelling fix. Merge intentionally does not — fusing
+	// two tags is an explicit act and the target's current visibility
+	// is likely what the user wants to keep.
+	if _, wasHidden := l.hiddenTags[oldNorm]; wasHidden {
+		delete(l.hiddenTags, oldNorm)
+		l.hiddenTags[newNorm] = struct{}{}
+	}
 	return renamed, absorbed, nil
 }
 
@@ -441,6 +604,9 @@ func (l *Library) MergeTags(source, target string) (renamed, absorbed int, err e
 			absorbed++
 		}
 	}
+	// Source no longer exists as a user tag; drop its hidden flag if
+	// any. Target's hidden state is left untouched.
+	delete(l.hiddenTags, srcNorm)
 	return renamed, absorbed, nil
 }
 
@@ -463,6 +629,9 @@ func (l *Library) DeleteTag(name string) int {
 		p.Tags = append(p.Tags[:idx], p.Tags[idx+1:]...)
 		affected++
 	}
+	// Deleting a tag also drops its hidden flag; a later re-creation
+	// of the same name should start visible.
+	delete(l.hiddenTags, norm)
 	return affected
 }
 

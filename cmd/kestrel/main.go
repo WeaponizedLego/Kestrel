@@ -148,11 +148,21 @@ func run(devMode bool, bind string) error {
 	}
 	clusterMgr := cluster.NewManager(lib)
 
+	// Video frame extraction shells out to ffmpeg when present;
+	// missing ffmpeg falls back to a placeholder thumbnail so the
+	// library remains identical across hosts that have it and don't.
+	videoProvider := thumbnail.NewFFmpegVideo()
+	if videoProvider.Available() {
+		slog.Info("ffmpeg detected — video thumbnails enabled", "binary", "ffmpeg")
+	} else {
+		slog.Info("ffmpeg not found on PATH — videos will use placeholder thumbnails")
+	}
+
 	runner := scanner.NewRunner(scanner.RunnerConfig{
 		Library:     lib,
 		Publisher:   hub,
 		ThumbStore:  pack,
-		Thumbnailer: thumbnail.GenerateWithHash,
+		Thumbnailer: thumbnail.NewMediaThumbnailer(videoProvider),
 		Autotag:     autotagOpts,
 		// Flush metadata right after every scan — a cancelled scan
 		// loses nothing more than whatever failed to save before the
@@ -164,7 +174,7 @@ func run(devMode bool, bind string) error {
 			hub.Publish("clusters:ready", map[string]any{
 				"reason": "scan-complete",
 			})
-			if err := persistence.Save(metaPath, lib.AllPhotos()); err != nil {
+			if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot()); err != nil {
 				slog.Error("post-scan save failed", "path", metaPath, "err", err)
 			}
 		},
@@ -184,6 +194,7 @@ func run(devMode bool, bind string) error {
 	libraryHandler := api.NewLibraryHandler(lib, runner, clusterMgr, hub, roots)
 	thumbsHandler := api.NewThumbsHandler(provider)
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
+	capabilitiesHandler := api.NewCapabilitiesHandler()
 
 	// File operations: journal is write-ahead, trash is Kestrel-managed.
 	// Recovery runs before the HTTP server starts so any in-flight op
@@ -224,7 +235,7 @@ func run(devMode bool, bind string) error {
 		Journal: fileJournal,
 		Trash:   trashBin,
 		Persist: func() error {
-			return persistence.Save(metaPath, lib.AllPhotos())
+			return persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot())
 		},
 		ScanActive: func() bool {
 			// File ops must not race a user-triggered scan writing
@@ -265,12 +276,13 @@ func run(devMode bool, bind string) error {
 		Assets:         assetFS,
 		Token:          token,
 		DevMode:        devMode,
-		LibraryHandler: libraryHandler,
-		ThumbsHandler:  thumbsHandler,
-		TaggingHandler: taggingHandler,
-		FileOpsHandler: fileOpsHandler,
-		Hub:            hub,
-		Activity:       activity,
+		LibraryHandler:      libraryHandler,
+		ThumbsHandler:       thumbsHandler,
+		TaggingHandler:      taggingHandler,
+		FileOpsHandler:      fileOpsHandler,
+		CapabilitiesHandler: capabilitiesHandler,
+		Hub:                 hub,
+		Activity:            activity,
 	})
 	if err != nil {
 		return fmt.Errorf("starting server: %w", err)
@@ -338,7 +350,7 @@ func run(devMode bool, bind string) error {
 	// goroutine could still be mutating the library while persistence
 	// takes its snapshot.
 	runner.Shutdown()
-	if err := persistence.Save(metaPath, lib.AllPhotos()); err != nil {
+	if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot()); err != nil {
 		slog.Error("final save failed", "path", metaPath, "err", err)
 	}
 
@@ -450,15 +462,20 @@ func hasherFor(lib *library.Library) thumbnail.PathHasher {
 // A missing file is intentionally not an error: first-run binaries
 // start with an empty library and build one via the scan API.
 func loadLibrary(lib *library.Library, path string) error {
-	photos, err := persistence.Load(path)
+	photos, hidden, err := persistence.Load(path)
 	if err != nil {
 		return err
 	}
-	if len(photos) == 0 {
+	if len(photos) == 0 && len(hidden) == 0 {
 		return nil
 	}
-	lib.ReplaceAll(photos)
-	slog.Info("library loaded", "count", len(photos), "path", path)
+	if len(photos) > 0 {
+		lib.ReplaceAll(photos)
+	}
+	if len(hidden) > 0 {
+		lib.LoadHiddenTags(hidden)
+	}
+	slog.Info("library loaded", "count", len(photos), "hidden_tags", len(hidden), "path", path)
 	return nil
 }
 
@@ -473,7 +490,7 @@ func autoSaveLoop(ctx context.Context, lib *library.Library, path string, interv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := persistence.Save(path, lib.AllPhotos()); err != nil {
+			if err := persistence.Save(path, lib.AllPhotos(), lib.HiddenTagSnapshot()); err != nil {
 				slog.Error("auto-save failed", "path", path, "err", err)
 			}
 		}

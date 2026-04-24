@@ -1,122 +1,14 @@
 # 📸 Kestrel
 
-Kestrel is a high-performance desktop photo manager built for very large libraries (20,000+ images), including collections stored on slow HDDs or network drives.
+High-performance desktop photo manager for very large local libraries (20,000 – 1,000,000+ images), including collections stored on slow HDDs or network drives.
 
-## Table of Contents
+## Why Kestrel
 
-- [Philosophy: Video Game Architecture](#philosophy-video-game-architecture)
-- [Core Features](#core-features)
-  - [1) In-Memory Truth](#1-in-memory-truth)
-  - [2) Zero-Latency Interaction](#2-zero-latency-interaction)
-  - [3) Slow Drive Strategy](#3-slow-drive-strategy)
-  - [4) Persistence with `library.gob`](#4-persistence-with-librarygob)
-  - [5) Assisted Tagging](#5-assisted-tagging)
-- [Tech Stack](#tech-stack)
-- [Runtime Flow](#runtime-flow)
-- [Install](#install)
-- [Getting Started (Dev)](#getting-started-dev)
-- [Roadmap / Future Work](#roadmap--future-work)
-- [Gitflow CI Enforcement](#gitflow-ci-enforcement)
-- [Coding Standards](#coding-standards)
-- [Troubleshooting / FAQ](#troubleshooting--faq)
-
-## Philosophy: Video Game Architecture
-
-Kestrel is designed like a game engine, not a traditional CRUD app.  
-The main goal is interaction speed after startup: smooth scrolling, sorting, and browsing without waiting on disk I/O.
-
-## Core Features
-
-### 1) In-Memory Truth
-
-**What it does**
-- Loads the active library state (metadata + thumbnails) into RAM.
-- Uses an in-memory map as the runtime source of truth.
-
-**Why it exists**
-- Eliminates repeated storage lookups during normal UI interaction.
-- Trades startup and memory cost for fast, consistent responsiveness.
-
-**How it behaves in real usage**
-- Startup work is front-loaded.
-- Once loaded, common operations read from memory instead of querying disk.
-- Target profile remains high-memory, low-latency (`~2GB - 4GB`, startup target `< 30s`).
-
-### 2) Zero-Latency Interaction
-
-**What it does**
-- Keeps scroll/sort/search interaction on the in-memory dataset.
-
-**Why it exists**
-- Disk and network drive latency are unpredictable and can cause UI stutter.
-
-**How it behaves in real usage**
-- Scrolling and navigation remain fluid because disk reads are not part of the interaction loop.
-- During browsing, no per-item database or disk queries are required.
-
-### 3) Slow Drive Strategy
-
-**What it does**
-- Separates raw-photo storage from browsing-performance storage.
-
-**Why it exists**
-- Large libraries often live on slow storage (HDD/NAS), but browsing still needs to feel instant.
-
-**How it behaves in real usage**
-- Raw photos stay on HDD/NAS.
-- Thumbnails are generated once, cached on a local SSD, and loaded into memory.
-- You browse quickly even when originals live on slow drives; full-resolution file access happens on open/view.
-
-### 4) Persistence with `library.gob`
-
-**What it does**
-- Saves application state to a compressed binary file (`library.gob`).
-
-**Why it exists**
-- Preserves computed/cached state between sessions.
-
-**How it behaves in real usage**
-- On startup, Kestrel restores state from persisted data.
-- On exit or manual sync, current state is written back.
-
-### 5) Assisted Tagging
-
-**What it does**
-- Auto-derives tags at scan time from EXIF (camera, lens, year, ISO, orientation), media kind, and — for GPS-tagged photos — an **offline** reverse-geocode to city + country via an embedded GeoNames dataset.
-- Computes a 64-bit perceptual hash (pHash) per photo and groups near-duplicates and visually-similar photos into clusters.
-- Provides a dedicated **Tagging Queue** UI that surfaces the largest untagged clusters first and lets the user tag a whole cluster in one click.
-
-**Why it exists**
-- A fresh library starts with zero tags. Without assistance, tagging tens of thousands of photos is daunting enough that users give up before they start.
-- Auto-tags give every photo a useful baseline for free. Cluster-first tagging turns one click into N tags, so the user reaches "fully tagged" in a feasible number of sessions.
-
-**How it behaves in real usage**
-- Auto-tags appear on every photo automatically after the scan, rendered distinctly from user tags so you can tell inferred from confirmed.
-- Opening the Tagging Queue shows clusters ordered by size; tagging the biggest groups first covers the most photos per click.
-- All of this stays **pure-Go and CGO-free** — the GeoNames dataset, EXIF parser, and pHash library are all embedded or pure-Go deps, so Kestrel still ships as a single cross-platform binary.
-
-> 📖 Full design in [`docs/assisted-tagging.md`](docs/assisted-tagging.md).
-
-## Tech Stack
-
-- **Frontend:** Vue 3 (Composition API) + Vite, using **manual island hydration** (each interactive region mounts as its own Vue app on a mostly-static HTML shell)
-- **Backend:** Go (Golang) for scanning, hashing, thumbnail workflow, and memory management
-- **UI Shell:** Go `net/http` server bound to `127.0.0.1`, frontend assets embedded via `//go:embed`. On launch, the binary opens the user's **default browser** at the chosen port — no webview, no bundled Chromium.
-- **Transport:** REST/JSON for request-response, a single WebSocket endpoint for server-pushed events (scan progress, thumbnail-ready notifications)
-- **Distribution:** A **single cross-platform executable** per target (Linux/macOS/Windows, amd64/arm64). Pure Go, CGO-free, produced by `go build`.
-- **Concurrency Model:** Go maps protected by `sync.RWMutex`
-
-> **Why a localhost server + browser instead of a webview?** It keeps the toolchain trivial
-> (just `go build` and `vite build`), the output is one static binary with no platform SDKs or
-> Chromium payloads, and it gives us full flexibility over the UI stack without living under a
-> desktop-bridge framework's constraints.
-
-## Runtime Flow
-
-1. Launch app and load persisted state into memory.
-2. Interact with the library from the in-memory map for low-latency browsing.
-3. Access original files from HDD/NAS only when opening full-resolution images.
-4. Persist updated state on exit or manual sync to `library.gob`.
+- Built for libraries that are too big for most photo managers to stay responsive on.
+- Works well when originals live on slow storage (HDD / NAS) — browsing is driven by cached thumbnails and in-memory metadata.
+- Ships as a **single cross-platform binary**. Pure Go, CGO-free, no bundled Chromium, no runtime dependencies.
+- Runs in your **default browser** via a local loopback server — not a webview, not an Electron shell.
+- Dark-mode native UI built on Vue 3 + Tailwind / daisyUI.
 
 ## Install
 
@@ -124,13 +16,12 @@ Kestrel ships as a single self-contained download per platform — no Go or Node
 
 ### macOS (Apple Silicon)
 
-1. Download `kestrel-macos-arm64-app.zip` and unzip it. You'll get `Kestrel.app`.
+1. Download `kestrel-macos-arm64-app.zip` and unzip it — you'll get `Kestrel.app`.
 2. Drag `Kestrel.app` into `/Applications`.
-3. The first time you launch it, **right-click → Open** (not double-click). macOS will warn that the app is from an unidentified developer; click **Open** anyway. This is a one-time per-install action — subsequent launches double-click normally.
-   - Alternatively, strip the quarantine flag from a terminal: `xattr -dr com.apple.quarantine /Applications/Kestrel.app`.
-4. Launching opens your default browser at a `http://127.0.0.1:<port>/` URL with an auto-generated session token. Closing every Kestrel browser tab quits the app within ~10 seconds.
+3. First launch: **right-click → Open** (not double-click). macOS will warn that the app is from an unidentified developer; click **Open** anyway. Subsequent launches double-click normally.
+   - Alternative: `xattr -dr com.apple.quarantine /Applications/Kestrel.app`.
 
-Builds are unsigned today — see [out-of-scope follow-ups](#roadmap--future-work) for proper notarization.
+Builds are unsigned today — proper notarization is a tracked follow-up.
 
 ### Linux (x86_64)
 
@@ -144,16 +35,66 @@ The AppImage requires FUSE 2 on the host (preinstalled on most desktop distros).
 
 Not packaged yet — the raw `kestrel-windows-amd64.exe` from CI artifacts works but spawns a console window. Tracked as a follow-up.
 
-## Getting Started (Dev)
+## Usage
+
+1. **Launch Kestrel.** It starts a local server on `127.0.0.1:<random-port>`, generates a per-run auth token, and opens your default browser at the loopback URL.
+2. **Point it at a folder.** Use the scan control in the UI to choose the root of your photo library. Kestrel walks the tree in parallel (one worker per CPU core), extracts EXIF / metadata, computes a perceptual hash per photo, and generates thumbnails.
+3. **Wait for the first scan.** For a 50k-photo library on a slow drive this can take a while — progress streams live into the UI over WebSocket. After the initial scan, startup is fast because metadata and the thumbnail index are loaded from a local cache.
+4. **Browse.** Scrolling, sorting, and filtering run against in-memory data, so the grid stays fluid regardless of where the original files live. Opening a full-resolution image may briefly hit the underlying storage.
+5. **Tag.** Auto-tags (camera, lens, year, place, kind) show up on every photo for free. The **Tagging Queue** groups visually similar photos into clusters so you can tag whole groups in one click.
+6. **Quit.** Closing every Kestrel browser tab shuts the app down automatically within ~10 seconds.
+
+Keyboard basics: arrow keys navigate the grid, **Enter** opens the full-resolution viewer, **Esc** closes it.
+
+## Features
+
+### In-memory truth
+
+All library metadata is loaded into RAM at startup and held in a `map[string]*Photo` guarded by `sync.RWMutex`. Scroll / sort / filter / search never touch disk. Trades startup time and memory (target: 2–4 GB for large libraries) for consistently low-latency interaction.
+
+### Zero-latency interaction
+
+Because the interaction loop never waits on I/O, unpredictable disk or network-drive latency can't cause UI stutter. No per-item database queries during browsing.
+
+### Slow-drive strategy
+
+Originals stay on their original drive. Thumbnails are generated once and persisted to a compact local cache (`thumbs.pack`) on fast storage, fronted by a memory-budgeted priority LRU with a pre-fetcher that anticipates scroll direction. Full-resolution reads happen only when you open a photo.
+
+### Persistence
+
+Two files make up the on-disk state:
+
+- `library_meta.gob` — small, versioned gob-encoded metadata, loaded synchronously at startup.
+- `thumbs.pack` — packed JPEG thumbnails with an index loaded up front and pixel data fetched on demand.
+
+Missing state files simply mean a fresh library; nothing else to configure.
+
+### Assisted tagging
+
+- **Auto-tags from metadata.** Every photo gets baseline tags (camera, lens, year, ISO, orientation, media kind) at scan time. GPS-tagged photos are reverse-geocoded to city + country using an **embedded offline GeoNames dataset** — no network calls.
+- **Perceptual-hash clustering.** A 64-bit pHash per photo groups near-duplicates and visually similar shots.
+- **Tagging Queue UI.** Clusters are ordered by size so you can tag the biggest groups first — one click tags N photos at once.
+
+All pure Go, all embedded, all cross-platform. See [`docs/assisted-tagging.md`](docs/assisted-tagging.md) for the full design.
+
+## How it works
+
+Kestrel uses a **"video game" architecture**: everything you interact with is already in RAM. The Go backend boots, loads the metadata map and thumbnail index, starts a `net/http` server on `127.0.0.1:0`, generates a session token, and opens the browser. The frontend talks to the backend over REST (commands) and a single one-way WebSocket (events like `scan:progress`, `thumbnail:ready`, `library:updated`).
+
+The Vue 3 frontend uses **manual island hydration**: a build-time-rendered static shell with a separate Vue app mounted per interactive region (Sidebar, Toolbar, PhotoGrid, StatusBar, TaggingQueue). No single-root SPA; no JS-side sorting or filtering over the photo list — all sort / filter / search goes through pre-built Go indices.
+
+For the full picture see [`docs/system-design.md`](docs/system-design.md) and [`docs/ui-design.md`](docs/ui-design.md).
+
+## Build from source
 
 ### Prerequisites
 
-- Go toolchain (1.22+)
-- Node.js (22+) and pnpm (via Corepack: `corepack enable`)
+- Go 1.22+
+- Node.js 22+ and pnpm (via Corepack: `corepack enable`)
 
-### Run in development mode
+### Development
 
-Dev runs two processes: Vite serves the frontend with HMR, and the Go binary serves the API + WebSocket. The frontend dev server proxies `/api` and `/ws` to the Go server.
+Dev runs two processes — Vite serves the frontend with HMR and proxies `/api` and `/ws` to the Go server:
 
 ```bash
 # Terminal 1 — frontend with HMR
@@ -163,82 +104,49 @@ cd frontend && pnpm install && pnpm dev
 go run ./cmd/kestrel --dev
 ```
 
-In `--dev` mode the Go binary skips opening the browser (you point your own at the Vite URL) and disables asset embedding so it doesn't need a built `frontend/dist`.
+`--dev` skips the browser launch (point your own at the Vite URL) and disables asset embedding, so you don't need a built `frontend/dist`.
 
-### Build the production binary
+### Production binary
 
 ```bash
-cd frontend && pnpm build   # emits frontend/dist/
+cd frontend && pnpm build        # emits frontend/dist/
 cd ..
 go build -ldflags="-s -w" -o kestrel ./cmd/kestrel
 ```
 
-The resulting `kestrel` binary embeds the built frontend, launches the default browser, and needs no external dependencies.
+The resulting `kestrel` binary embeds the built frontend, opens the default browser on launch, and has no external dependencies.
 
-## Roadmap / Future Work
+CI cross-compiles for `linux/{amd64,arm64}`, `darwin/{amd64,arm64}`, and `windows/amd64`. The build stays CGO-free so cross-compilation works from any host.
 
-### Semantic content tagging (CLIP-style embeddings) — *post-MVP*
+## Tech stack
 
-Once the MVP is stable, the plan is to add **on-device semantic tagging**: image embeddings
-(CLIP-style) that let you search your library by content — `"beach at sunset"`,
-`"dog in grass"`, `"receipt"` — without ever having tagged those photos yourself.
-
-This is intentionally **not** part of the MVP. Every practical ML inference runtime in Go
-today either requires CGO-linked ONNX/GGML bindings or a separately shipped runtime binary.
-Both would break Kestrel's current **pure-Go, single cross-platform binary** guarantee,
-which is a core UX promise of the project.
-
-When we revisit this, we'll be making a conscious decision between:
-
-- **Accept CGO** for a native ONNX runtime (loses clean cross-compilation).
-- **Ship embeddings as an optional companion binary** that Kestrel talks to over the
-  existing HTTP transport, so the core stays pure Go.
-- **Wait** for a production-grade pure-Go inference path to mature.
-
-Until then, Kestrel relies on its three-layer [assisted tagging](#5-assisted-tagging) to
-close the "new library with no tags" gap.
+- **Frontend:** Vue 3 (Composition API) + Vite, manual island hydration, Tailwind v4 + daisyUI.
+- **Backend:** Go — scanner worker pool, in-memory library, thumbnail pipeline, persistence.
+- **Transport:** REST/JSON for commands, a single WebSocket (`/ws`) for server-pushed events.
+- **Embedding:** `//go:embed frontend/dist/*` — the built frontend ships inside the Go binary.
+- **Concurrency:** `sync.RWMutex` around the photo map, worker pools sized to `runtime.NumCPU()`.
+- **Distribution:** Pure Go, CGO-free, single static binary per target.
 
 ## Documentation
 
-Detailed design documents live in the [`docs/`](docs/) folder:
+Detailed design documents live in [`docs/`](docs/):
 
-- **[System Design](docs/system-design.md)** — Architecture, data flow, package structure, concurrency patterns, persistence strategy
-- **[UI Design](docs/ui-design.md)** — Frontend architecture, component hierarchy, island hydration model, REST/WebSocket transport
-- **[Go Readability](docs/go-readability.md)** — Code style, naming, comments, testing, and readability standards
-- **[Assisted Tagging](docs/assisted-tagging.md)** — Auto-derived tags, pHash clustering, and the Tagging Queue UX for fresh libraries
+- [System Design](docs/system-design.md) — architecture, data flow, packages, concurrency, persistence.
+- [UI Design](docs/ui-design.md) — islands, component hierarchy, REST / WS transport.
+- [Assisted Tagging](docs/assisted-tagging.md) — auto-tags, pHash clustering, Tagging Queue UX.
+- [Visual Design](docs/visual-design.md) — visual language and component styling.
+- [Go Readability](docs/go-readability.md) — code style, naming, testing conventions.
 
-## Gitflow CI Enforcement
+## Roadmap
 
-This repository includes CI workflows to enforce strict Gitflow pull-request flow:
+The main post-MVP item is **on-device semantic tagging** (CLIP-style embeddings) — searching by content, e.g. "beach at sunset", without ever tagging those photos yourself. It's deliberately not in the MVP because every practical ML inference path in Go today either requires CGO-linked bindings or a separately shipped runtime, both of which would break Kestrel's single-binary / pure-Go guarantee. Until a clean path exists, Kestrel relies on [assisted tagging](#assisted-tagging) to close the "new library, no tags" gap.
 
-- `gitflow-guard` (`.github/workflows/gitflow-guard.yml`)
-- `develop-pr-go-reviewer` (`.github/workflows/develop-pr-go-reviewer.yml`)
+Out of scope: multi-user / networked access (loopback only by design), cloud sync, plugin architecture.
 
-### Required repository settings
+## Contributing
 
-To enforce this strictly, configure branch protection (or rulesets) for `develop` and `main`:
+The repo uses strict Gitflow:
 
-1. Require a pull request before merging.
-2. Block direct pushes (including admins if you want absolute enforcement).
-3. Require status checks to pass before merge.
-4. Mark these checks as required:
-   - **Gitflow Guard / Validate Gitflow branch mapping**
-   - **Develop PR Go Reviewer / Run go-pr-reviewer**
-5. Add repository secret `COPILOT_GITHUB_TOKEN` with the **Copilot Requests** permission.
-
-## Coding Standards
-
-- **Go style:** `PascalCase` for exported methods/structs, `camelCase` for private helpers/variables.
-- **Concurrency rule:** Always guard shared library map access with `sync.RWMutex`.
-- **Frontend style:** Use Vue 3 `<script setup lang="ts">` and talk to Go via the shared `fetch` / WebSocket client in `frontend/src/transport/`.
-
-## Troubleshooting / FAQ
-
-**Why is RAM usage high?**  
-Kestrel intentionally keeps metadata and thumbnails in memory to remove interaction-time I/O and keep navigation fast.
-
-**Why can startup feel heavier than browsing?**  
-Startup performs the expensive loading step up front so runtime interactions stay smooth afterward.
-
-**Why can opening a full image still be slower than scrolling?**  
-Browsing uses in-memory/thumbnail data, but opening full-resolution files may read from HDD/NAS on demand.
+- Direct pushes to `develop` and `main` are blocked — PRs only.
+- Required checks: **Gitflow Guard** and **Develop PR Go Reviewer**.
+- Go style follows [`docs/go-readability.md`](docs/go-readability.md); broader contributor guidance lives in [`CLAUDE.md`](CLAUDE.md).

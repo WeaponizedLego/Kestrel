@@ -5,7 +5,7 @@ import { onEvent } from '../transport/events'
 import { onOpenTagManager } from '../transport/tagging'
 import { requestSearchTokens } from '../transport/search'
 
-interface TagStat { name: string; count: number }
+interface TagStat { name: string; count: number; kind: 'user' | 'auto'; hidden: boolean }
 
 type Pending =
   | { kind: 'idle' }
@@ -19,6 +19,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const status = ref<string | null>(null)
 const filter = ref('')
+const showHidden = ref(false)
 const pending = ref<Pending>({ kind: 'idle' })
 
 const filtered = computed<TagStat[]>(() => {
@@ -31,11 +32,29 @@ async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    tags.value = await apiGet<TagStat[]>('/api/tags/list')
+    const qs = showHidden.value ? '?include_hidden=1&include_auto=1' : ''
+    tags.value = await apiGet<TagStat[]>(`/api/tags/list${qs}`)
   } catch (err) {
     error.value = friendlyError(err)
   } finally {
     loading.value = false
+  }
+}
+
+async function onToggleShowHidden(): Promise<void> {
+  // Cancel any in-flight edit so the row it was attached to doesn't
+  // evaporate mid-action when the visible set changes.
+  if (pending.value.kind !== 'idle') pending.value = { kind: 'idle' }
+  await refresh()
+}
+
+async function setHidden(name: string, hidden: boolean): Promise<void> {
+  try {
+    await apiPost<{ name: string; hidden: boolean }>('/api/tags/hidden', { name, hidden })
+    status.value = hidden ? `Hid "${name}".` : `Unhid "${name}".`
+    await refresh()
+  } catch (err) {
+    error.value = friendlyError(err)
   }
 }
 
@@ -144,6 +163,15 @@ onUnmounted(() => {
           placeholder="Filter tags…"
           aria-label="Filter tags"
         />
+        <label class="label cursor-pointer gap-2 py-0">
+          <span class="label-text text-xs">Show hidden</span>
+          <input
+            type="checkbox"
+            class="toggle toggle-sm"
+            :checked="showHidden"
+            @change="(e) => { showHidden = (e.target as HTMLInputElement).checked; onToggleShowHidden() }"
+          />
+        </label>
         <button type="button" class="btn btn-ghost btn-sm btn-square ml-auto" @click="close" aria-label="Close">✕</button>
       </div>
 
@@ -162,11 +190,12 @@ onUnmounted(() => {
         <ul v-else class="divide-y divide-base-300">
           <li
             v-for="t in filtered"
-            :key="t.name"
+            :key="`${t.kind}:${t.name}`"
             class="grid items-center gap-3 px-4 py-2 hover:bg-base-200"
+            :class="{ 'opacity-60': t.hidden }"
             style="grid-template-columns: 1fr auto auto;"
           >
-            <template v-if="pending.kind === 'rename' && pending.from === t.name">
+            <template v-if="pending.kind === 'rename' && pending.from === t.name && t.kind === 'user'">
               <span class="truncate text-sm text-base-content/70">{{ t.name }} →</span>
               <input
                 class="input input-sm input-bordered input-primary min-w-40"
@@ -182,7 +211,7 @@ onUnmounted(() => {
               </div>
             </template>
 
-            <template v-else-if="pending.kind === 'merge' && pending.source === t.name">
+            <template v-else-if="pending.kind === 'merge' && pending.source === t.name && t.kind === 'user'">
               <span class="truncate text-sm text-base-content/70">Merge {{ t.name }} into</span>
               <input
                 class="input input-sm input-bordered input-primary min-w-40"
@@ -200,7 +229,7 @@ onUnmounted(() => {
               </div>
             </template>
 
-            <template v-else-if="pending.kind === 'confirm-delete' && pending.name === t.name">
+            <template v-else-if="pending.kind === 'confirm-delete' && pending.name === t.name && t.kind === 'user'">
               <span class="truncate text-sm text-error">
                 Delete "{{ t.name }}" from all {{ t.count }} photos?
               </span>
@@ -212,21 +241,42 @@ onUnmounted(() => {
             </template>
 
             <template v-else>
-              <button
-                type="button"
-                class="truncate text-left font-medium hover:text-primary hover:underline"
-                @click="filterByTag(t.name)"
-                :title="`Filter the grid by ${t.name}`"
-              >
-                {{ t.name }}
-              </button>
+              <span class="flex items-center gap-2 truncate">
+                <button
+                  type="button"
+                  class="truncate text-left font-medium hover:text-primary hover:underline"
+                  @click="filterByTag(t.name)"
+                  :title="`Filter the grid by ${t.name}`"
+                >
+                  {{ t.name }}
+                </button>
+                <span v-if="t.kind === 'auto'" class="badge badge-ghost badge-xs">auto</span>
+                <span v-else-if="t.hidden" class="badge badge-ghost badge-xs">hidden</span>
+              </span>
               <span class="text-[10px] uppercase tracking-wider tabular-nums text-base-content/50">
                 {{ t.count }} photo{{ t.count === 1 ? '' : 's' }}
               </span>
               <div class="flex gap-1">
-                <button type="button" class="btn btn-xs btn-ghost" @click="startRename(t.name)">Rename</button>
-                <button type="button" class="btn btn-xs btn-ghost" @click="startMerge(t.name)">Merge…</button>
-                <button type="button" class="btn btn-xs btn-ghost text-error" @click="startDelete(t.name)">Delete</button>
+                <template v-if="t.kind === 'auto'">
+                  <!-- Auto-tags are read-only: they regenerate on every scan. -->
+                </template>
+                <template v-else>
+                  <button type="button" class="btn btn-xs btn-ghost" @click="startRename(t.name)">Rename</button>
+                  <button type="button" class="btn btn-xs btn-ghost" @click="startMerge(t.name)">Merge…</button>
+                  <button
+                    v-if="showHidden && t.hidden"
+                    type="button"
+                    class="btn btn-xs btn-ghost"
+                    @click="setHidden(t.name, false)"
+                  >Unhide</button>
+                  <button
+                    v-else-if="showHidden"
+                    type="button"
+                    class="btn btn-xs btn-ghost"
+                    @click="setHidden(t.name, true)"
+                  >Hide</button>
+                  <button type="button" class="btn btn-xs btn-ghost text-error" @click="startDelete(t.name)">Delete</button>
+                </template>
               </div>
             </template>
           </li>

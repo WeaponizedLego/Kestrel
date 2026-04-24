@@ -108,8 +108,10 @@ type Options struct {
 }
 
 // Progress is the payload of a "scan:progress" event. Total is -1
-// while the walk is still discovering files, then set to the final
-// count on the terminal event.
+// while the walk is still discovering files, flipping to the final
+// discovered count the instant the walker finishes (well before
+// processing completes) so the UI can render a real progress bar
+// through the bulk of the scan instead of only at the very end.
 type Progress struct {
 	Processed int    `json:"processed"`
 	Total     int    `json:"total"`
@@ -117,13 +119,25 @@ type Progress struct {
 }
 
 // supportedExts is the set of file extensions the scanner treats as
-// images. Extensions are compared case-insensitively.
+// media (still images and videos). Extensions are compared
+// case-insensitively. Videos that depend on ffmpeg for thumbnail and
+// metadata are still indexed when ffmpeg is missing — they fall back
+// to a placeholder thumbnail and zero dimensions, so library state
+// stays consistent across machines with and without ffmpeg.
 var supportedExts = map[string]struct{}{
+	// Images
 	".jpg":  {},
 	".jpeg": {},
 	".png":  {},
 	".gif":  {},
 	".webp": {},
+	// Videos — must stay in lockstep with autotag.videoExts.
+	".mp4":  {},
+	".mov":  {},
+	".m4v":  {},
+	".avi":  {},
+	".mkv":  {},
+	".webm": {},
 }
 
 // Scan walks root in parallel and writes each discovered photo
@@ -147,8 +161,17 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 	// through the close(paths) → worker-done → WaitGroup chain, even
 	// though the logical ordering is safe.
 	walkErrCh := make(chan error, 1)
+	// discovered holds the total file count the walker enqueued. It
+	// starts at -1 ("still walking") and is set exactly once, from the
+	// walker goroutine, the moment filepath.WalkDir returns. Workers
+	// draining `paths` read it on every progressEvery boundary so their
+	// emissions carry a real total as soon as enumeration is done.
+	var discovered atomic.Int64
+	discovered.Store(-1)
 	go func() {
-		walkErrCh <- walkPaths(ctx, root, paths)
+		count, err := walkPaths(ctx, root, paths)
+		discovered.Store(int64(count))
+		walkErrCh <- err
 		close(paths)
 	}()
 
@@ -158,7 +181,7 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			processPaths(ctx, paths, lib, opts, root, &added)
+			processPaths(ctx, paths, lib, opts, root, &added, &discovered)
 		}()
 	}
 	workers.Wait()
@@ -183,26 +206,31 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 }
 
 // walkPaths is the producer half of the pool: it walks the tree and
-// pushes every supported image path onto paths. It stops early if ctx
-// is cancelled or filepath.WalkDir reports an error on the root itself.
-func walkPaths(ctx context.Context, root string, paths chan<- string) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// pushes every supported image path onto paths. It returns the number
+// of paths successfully enqueued so the caller can publish a known
+// total once enumeration is done. Stops early if ctx is cancelled or
+// filepath.WalkDir reports an error on the root itself.
+func walkPaths(ctx context.Context, root string, paths chan<- string) (int, error) {
+	var count int
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walking %s: %w", path, err)
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if d.IsDir() || !isSupportedImage(path) {
+		if d.IsDir() || !isSupportedMedia(path) {
 			return nil
 		}
 		select {
 		case paths <- path:
+			count++
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	})
+	return count, err
 }
 
 // processPaths is the consumer half: each worker pulls paths, builds
@@ -222,6 +250,7 @@ func processPaths(
 	opts Options,
 	root string,
 	added *atomic.Int64,
+	discovered *atomic.Int64,
 ) {
 	for {
 		select {
@@ -239,7 +268,7 @@ func processPaths(
 			// cheaply instead of re-hashing every file.
 			if unchanged(path, lib) {
 				n := added.Add(1)
-				publishProgress(opts, n, root)
+				publishProgress(opts, n, root, discovered)
 				if !throttle(ctx, opts.ThrottleSleep) {
 					return
 				}
@@ -261,7 +290,7 @@ func processPaths(
 			lib.AddPhoto(photo)
 
 			n := added.Add(1)
-			publishProgress(opts, n, root)
+			publishProgress(opts, n, root, discovered)
 			if !throttle(ctx, opts.ThrottleSleep) {
 				return
 			}
@@ -324,13 +353,17 @@ func unchanged(path string, lib Library) bool {
 // publishProgress emits a scan:progress event when n hits the
 // batching boundary. Extracted so both the skip-fast-path and the
 // full-build path share one call site and one policy.
-func publishProgress(opts Options, n int64, root string) {
+func publishProgress(opts Options, n int64, root string, discovered *atomic.Int64) {
 	if opts.Publisher == nil || n%progressEvery != 0 {
 		return
 	}
+	total := -1
+	if discovered != nil {
+		total = int(discovered.Load())
+	}
 	opts.Publisher.Publish("scan:progress", Progress{
 		Processed: int(n),
-		Total:     -1,
+		Total:     total,
 		Root:      root,
 	})
 }
@@ -412,9 +445,9 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// isSupportedImage reports whether path has a recognised image
-// extension. Comparison is case-insensitive.
-func isSupportedImage(path string) bool {
+// isSupportedMedia reports whether path has a recognised media
+// extension (image or video). Comparison is case-insensitive.
+func isSupportedMedia(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	_, ok := supportedExts[ext]
 	return ok

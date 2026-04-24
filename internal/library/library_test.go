@@ -210,6 +210,120 @@ func TestLibrary_AllTags(t *testing.T) {
 	}
 }
 
+func TestLibrary_AllTagsFiltered_HiddenAndAuto(t *testing.T) {
+	lib := New()
+	lib.AddPhoto(&Photo{Path: "/a.jpg", Name: "a.jpg", Tags: []string{"cats", "wip"}, AutoTags: []string{"camera:nikon", "year:2024"}})
+	lib.AddPhoto(&Photo{Path: "/b.jpg", Name: "b.jpg", Tags: []string{"cats"}, AutoTags: []string{"year:2024"}})
+	if err := lib.SetTagHidden("wip", true); err != nil {
+		t.Fatalf("SetTagHidden: %v", err)
+	}
+
+	// Default view: wip is hidden, auto is excluded.
+	stats := lib.AllTagsFiltered(false, false)
+	if len(stats) != 1 || stats[0].Name != "cats" {
+		t.Fatalf("default: got %+v, want only cats", stats)
+	}
+
+	// Include hidden only.
+	stats = lib.AllTagsFiltered(true, false)
+	if len(stats) != 2 {
+		t.Fatalf("hidden-on: got %d, want 2 (%+v)", len(stats), stats)
+	}
+	for _, s := range stats {
+		if s.Kind != TagKindUser {
+			t.Errorf("expected Kind=user, got %q", s.Kind)
+		}
+		if s.Name == "wip" && !s.Hidden {
+			t.Errorf("wip should report Hidden=true")
+		}
+		if s.Name == "cats" && s.Hidden {
+			t.Errorf("cats should report Hidden=false")
+		}
+	}
+
+	// Include hidden + auto.
+	stats = lib.AllTagsFiltered(true, true)
+	kinds := map[string]string{}
+	for _, s := range stats {
+		kinds[s.Name] = s.Kind
+	}
+	if kinds["camera:nikon"] != TagKindAuto || kinds["year:2024"] != TagKindAuto {
+		t.Fatalf("auto kinds wrong: %+v", kinds)
+	}
+	if kinds["cats"] != TagKindUser || kinds["wip"] != TagKindUser {
+		t.Fatalf("user kinds wrong: %+v", kinds)
+	}
+}
+
+func TestLibrary_SetTagHidden_Persistence(t *testing.T) {
+	lib := New()
+	if err := lib.SetTagHidden("  WIP ", true); err != nil {
+		t.Fatalf("SetTagHidden: %v", err)
+	}
+	if !lib.IsTagHidden("wip") {
+		t.Fatalf("IsTagHidden should be true after normalization")
+	}
+	snap := lib.HiddenTagSnapshot()
+	if len(snap) != 1 || snap[0] != "wip" {
+		t.Fatalf("snapshot = %v, want [wip]", snap)
+	}
+
+	// Reload round-trips.
+	lib2 := New()
+	lib2.LoadHiddenTags(snap)
+	if !lib2.IsTagHidden("wip") {
+		t.Fatalf("LoadHiddenTags lost the set")
+	}
+
+	if err := lib.SetTagHidden("wip", false); err != nil {
+		t.Fatalf("unhide: %v", err)
+	}
+	if lib.IsTagHidden("wip") {
+		t.Fatalf("IsTagHidden should be false after unhide")
+	}
+}
+
+func TestLibrary_DeleteTag_ClearsHidden(t *testing.T) {
+	lib := New()
+	lib.AddPhoto(&Photo{Path: "/a.jpg", Name: "a.jpg", Tags: []string{"wip"}})
+	_ = lib.SetTagHidden("wip", true)
+	lib.DeleteTag("wip")
+	if lib.IsTagHidden("wip") {
+		t.Fatalf("DeleteTag should drop the hidden flag")
+	}
+}
+
+func TestLibrary_RenameTag_CarriesHidden(t *testing.T) {
+	lib := New()
+	lib.AddPhoto(&Photo{Path: "/a.jpg", Name: "a.jpg", Tags: []string{"wip"}})
+	_ = lib.SetTagHidden("wip", true)
+	if _, _, err := lib.RenameTag("wip", "draft"); err != nil {
+		t.Fatalf("RenameTag: %v", err)
+	}
+	if lib.IsTagHidden("wip") {
+		t.Fatalf("rename source should be cleared from hidden set")
+	}
+	if !lib.IsTagHidden("draft") {
+		t.Fatalf("rename target should pick up hidden flag")
+	}
+}
+
+func TestLibrary_MergeTags_DropsSourceHidden(t *testing.T) {
+	lib := New()
+	lib.AddPhoto(&Photo{Path: "/a.jpg", Name: "a.jpg", Tags: []string{"wip"}})
+	lib.AddPhoto(&Photo{Path: "/b.jpg", Name: "b.jpg", Tags: []string{"draft"}})
+	_ = lib.SetTagHidden("wip", true)
+	if _, _, err := lib.MergeTags("wip", "draft"); err != nil {
+		t.Fatalf("MergeTags: %v", err)
+	}
+	if lib.IsTagHidden("wip") {
+		t.Fatalf("merge should clear the source's hidden flag")
+	}
+	if lib.IsTagHidden("draft") {
+		t.Fatalf("merge should not auto-hide the target")
+	}
+}
+
 func TestLibrary_RenameTag(t *testing.T) {
 	lib := New()
 	lib.AddPhoto(&Photo{Path: "/a.jpg", Name: "a.jpg", Tags: []string{"red", "cts", "blue"}})

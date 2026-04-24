@@ -7,15 +7,34 @@ import { undoToast, runUndoToast, clearUndoToast } from '../transport/undo'
 interface ScanProgress { processed: number; total: number; root: string }
 interface ScanDone { added: number; cancelled: boolean; error?: string; intensity?: ScanIntensity }
 interface ScanStarted { id: string; root: string; intensity?: ScanIntensity }
+interface RescanProgress { root_index: number; root_total: number; current_root: string; phase: 'scan' | 'prune' }
 type ScanIntensity = 'normal' | 'low'
 
 const baseMessage = ref('Idle')
 const photoCount = ref<number | null>(null)
 const scanProcessed = ref(0)
 const scanTotal = ref(0)
+const rescanRootIndex = ref(0)
+const rescanRootTotal = ref(0)
+const rescanPhase = ref<'scan' | 'prune' | null>(null)
+
+const rescanPrefix = computed(() => {
+  if (!resyncing.value || rescanRootTotal.value <= 0) return ''
+  return `Syncing folder ${rescanRootIndex.value}/${rescanRootTotal.value}`
+})
 
 const message = computed(() => {
-  if (resyncing.value) return 'Syncing library…'
+  if (resyncing.value) {
+    const prefix = rescanPrefix.value || 'Syncing library'
+    if (rescanPhase.value === 'prune') return `${prefix} — removing missing files`
+    if (scanProcessed.value > 0) {
+      if (scanTotal.value > 0) {
+        return `${prefix} — ${scanProcessed.value.toLocaleString()} of ${scanTotal.value.toLocaleString()}`
+      }
+      return `${prefix} — discovering, ${scanProcessed.value.toLocaleString()} found`
+    }
+    return `${prefix}…`
+  }
   if (resyncNotice.value) return resyncNotice.value
   return baseMessage.value
 })
@@ -97,6 +116,23 @@ onMounted(() => {
       baseMessage.value = `Scan complete — ${p.added.toLocaleString()} photos`
       pulseFlashOk()
     }
+  }))
+  unsubs.push(onEvent('rescan:progress', (payload) => {
+    const p = payload as RescanProgress
+    rescanRootIndex.value = p.root_index
+    rescanRootTotal.value = p.root_total
+    rescanPhase.value = p.phase
+    // New root starting — reset the per-root scan counters so the bar
+    // restarts from 0 instead of showing the previous root's tail.
+    if (p.phase === 'scan') {
+      scanProcessed.value = 0
+      scanTotal.value = 0
+    }
+  }))
+  unsubs.push(onEvent('rescan:done', () => {
+    rescanRootIndex.value = 0
+    rescanRootTotal.value = 0
+    rescanPhase.value = null
   }))
   unsubs.push(onEvent('library:updated', (payload) => {
     const { count } = (payload as { count: number }) ?? { count: 0 }

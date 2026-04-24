@@ -55,6 +55,9 @@ func Generate(path string) ([]byte, error) {
 //
 // A zero hash means "not computed" (e.g. extremely small input); the
 // caller treats it as absent, the same as a freshly-loaded v1 Photo.
+//
+// This function is image-only — videos return an error. Use
+// NewMediaThumbnailer for a Thumbnailer that also handles video.
 func GenerateWithHash(path string) ([]byte, uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -66,16 +69,68 @@ func GenerateWithHash(path string) ([]byte, uint64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("decoding %s: %w", path, err)
 	}
+	return encodeAndHash(src, path)
+}
 
+// NewMediaThumbnailer returns a thumbnail function that dispatches by
+// file extension: images go through the stdlib decode path, videos
+// have a single frame pulled via the supplied VideoProvider. When the
+// provider is nil or its Available reports false, video calls return a
+// placeholder thumbnail (PHash = 0) instead of an error so the photo
+// still lands in the library.
+//
+// The returned closure matches scanner.Thumbnailer so it can be wired
+// straight into scanner.Options.
+func NewMediaThumbnailer(video VideoProvider) func(path string) ([]byte, uint64, error) {
+	if video == nil {
+		video = noVideo{}
+	}
+	return func(path string) ([]byte, uint64, error) {
+		if !IsVideoPath(path) {
+			return GenerateWithHash(path)
+		}
+		if !video.Available() {
+			data, err := encodePlaceholder()
+			return data, 0, err
+		}
+		// videoSeekSeconds is small enough to clear most title cards
+		// and intro fades but inside the typical clip length we'd see
+		// in a personal library.
+		const videoSeekSeconds = 1.0
+		src, err := video.ExtractFrame(path, videoSeekSeconds)
+		if err != nil {
+			data, encErr := encodePlaceholder()
+			if encErr != nil {
+				return nil, 0, fmt.Errorf("video frame for %s failed and placeholder failed: %w", path, encErr)
+			}
+			return data, 0, nil
+		}
+		return encodeAndHash(src, path)
+	}
+}
+
+// encodeAndHash applies the standard scale + JPEG-encode + dHash
+// pipeline to a decoded image. Shared between the still-image and
+// video-frame paths so a video thumbnail looks identical to an image
+// thumbnail downstream (same size, same encoding, same hash function).
+func encodeAndHash(src image.Image, path string) ([]byte, uint64, error) {
 	dst := scaleToFit(src, ThumbSize)
-
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: JPEGQuality}); err != nil {
 		return nil, 0, fmt.Errorf("encoding thumbnail for %s: %w", path, err)
 	}
+	return buf.Bytes(), perceptualHash(src), nil
+}
 
-	hash := perceptualHash(src)
-	return buf.Bytes(), hash, nil
+// encodePlaceholder returns the JPEG bytes of the static video
+// placeholder. Used when ffmpeg is missing or frame extraction fails
+// — the thumb cache still gets an entry so the grid renders something.
+func encodePlaceholder() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, videoPlaceholder(), &jpeg.Options{Quality: JPEGQuality}); err != nil {
+		return nil, fmt.Errorf("encoding video placeholder: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // dHashWidth and dHashHeight are the resample dimensions for the
