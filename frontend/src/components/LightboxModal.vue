@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import type { Photo } from '../types'
 import { isVideo } from '../util/media'
+import { copyImageViaCanvas } from '../util/clipboardFallback'
 
 const props = defineProps<{ photo: Photo }>()
 const emit = defineEmits<{
@@ -53,33 +54,19 @@ async function copyImage() {
   copyError.value = null
   copyState.value = 'copying'
   try {
-    const res = await fetch(src.value)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const sourceBlob = await res.blob()
-    const pngBlob = await encodePng(sourceBlob)
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+    await apiPost<{ copied: boolean }>('/api/clipboard/copy', { path: props.photo.Path })
     flashCopyState('copied')
-  } catch (err) {
-    copyError.value = friendlyError(err)
-    flashCopyState('error')
+    return
+  } catch (backendErr) {
+    try {
+      await copyImageViaCanvas(src.value)
+      flashCopyState('copied')
+      return
+    } catch {
+      copyError.value = friendlyError(backendErr)
+      flashCopyState('error')
+    }
   }
-}
-
-async function encodePng(source: Blob): Promise<Blob> {
-  const bitmap = await createImageBitmap(source)
-  const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('canvas 2d context unavailable')
-  ctx.drawImage(bitmap, 0, 0)
-  bitmap.close?.()
-  return await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('png encode failed'))),
-      'image/png',
-    )
-  })
 }
 
 function flashCopyState(next: 'copied' | 'error') {

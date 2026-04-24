@@ -49,8 +49,9 @@ const flashOk = ref(false)
 let flashTimer: number | null = null
 
 const scanPct = computed(() => {
-  if (!scanRunning.value || scanTotal.value <= 0) return null
+  if (!scanRunning.value && !resyncing.value) return null
   if (scanIntensity.value === 'low') return null
+  if (scanTotal.value <= 0 || scanProcessed.value <= 0) return -1
   return Math.min(100, Math.round((scanProcessed.value / scanTotal.value) * 100))
 })
 
@@ -85,6 +86,12 @@ onMounted(() => {
   unsubs.push(onEvent('scan:started', (payload) => {
     const p = payload as ScanStarted
     scanIntensity.value = p.intensity === 'low' ? 'low' : 'normal'
+    // Reset counters here, tied to the event that genuinely begins a
+    // scan, so a race between scan:progress and rescan:progress can't
+    // zero out fresh counts from the new root.
+    scanProcessed.value = 0
+    scanTotal.value = 0
+    scanRunning.value = true
   }))
   unsubs.push(onEvent('scan:progress', (payload) => {
     const p = payload as ScanProgress
@@ -122,12 +129,10 @@ onMounted(() => {
     rescanRootIndex.value = p.root_index
     rescanRootTotal.value = p.root_total
     rescanPhase.value = p.phase
-    // New root starting — reset the per-root scan counters so the bar
-    // restarts from 0 instead of showing the previous root's tail.
-    if (p.phase === 'scan') {
-      scanProcessed.value = 0
-      scanTotal.value = 0
-    }
+    // A rescan always runs the underlying Scan at normal intensity —
+    // clear any stale "low" tag from a prior background sweep so the
+    // progress bar isn't suppressed for the user's explicit action.
+    if (p.phase === 'scan') scanIntensity.value = 'normal'
   }))
   unsubs.push(onEvent('rescan:done', () => {
     rescanRootIndex.value = 0
@@ -157,8 +162,16 @@ onBeforeUnmount(() => { for (const u of unsubs) u() })
     </span>
 
     <div v-if="scanPct !== null" class="flex items-center gap-2">
-      <progress class="progress progress-primary w-32 h-1" :value="scanPct" max="100" />
-      <span class="text-primary tabular-nums w-8 text-right">{{ scanPct }}%</span>
+      <progress
+        v-if="scanPct >= 0"
+        class="progress progress-primary w-32 h-1"
+        :value="scanPct"
+        max="100"
+      />
+      <progress v-else class="progress progress-primary w-32 h-1" />
+      <span class="text-primary tabular-nums w-8 text-right">
+        {{ scanPct >= 0 ? `${scanPct}%` : '…' }}
+      </span>
     </div>
 
     <span class="flex-1" aria-hidden="true" />

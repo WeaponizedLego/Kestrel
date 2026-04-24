@@ -4,29 +4,30 @@ import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import { useCapabilities } from '../transport/capabilities'
 import type { Photo } from '../types'
 import { isVideo } from '../util/media'
+import { copyImageViaCanvas } from '../util/clipboardFallback'
 
 const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
 const LightboxModal = defineAsyncComponent(() => import('../components/LightboxModal.vue'))
 
-const props = defineProps<{ photo: Photo }>()
+const props = defineProps<{ photo: Photo | null }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'prev'): void
   (e: 'next'): void
 }>()
 
-const src = computed(() => photoSrc(props.photo.Path))
-const video = computed(() => isVideo(props.photo))
+const src = computed(() => (props.photo ? photoSrc(props.photo.Path) : ''))
+const video = computed(() => (props.photo ? isVideo(props.photo) : false))
 const capabilities = useCapabilities()
 
 const dims = computed(() =>
-  props.photo.Width && props.photo.Height
+  props.photo && props.photo.Width && props.photo.Height
     ? `${props.photo.Width} × ${props.photo.Height}`
     : '—',
 )
-const sizeLabel = computed(() => formatBytes(props.photo.SizeBytes))
-const takenLabel = computed(() => formatDate(props.photo.TakenAt))
-const modifiedLabel = computed(() => formatDate(props.photo.ModTime))
+const sizeLabel = computed(() => (props.photo ? formatBytes(props.photo.SizeBytes) : '—'))
+const takenLabel = computed(() => formatDate(props.photo?.TakenAt))
+const modifiedLabel = computed(() => formatDate(props.photo?.ModTime))
 
 function formatBytes(n: number): string {
   const units = ['B', 'KB', 'MB', 'GB']
@@ -47,6 +48,7 @@ defineExpose({ openPreview })
 
 function onKey(e: KeyboardEvent) {
   if (previewOpen.value) return
+  if (!props.photo) return
   switch (e.key) {
     case 'Escape': emit('close'); break
     case 'ArrowLeft': emit('prev'); break
@@ -59,6 +61,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 const revealError = ref<string | null>(null)
 async function revealInFolder() {
+  if (!props.photo) return
   revealError.value = null
   try {
     await apiPost<{ revealed: boolean }>('/api/reveal', { path: props.photo.Path })
@@ -72,37 +75,24 @@ const copyError = ref<string | null>(null)
 let copyResetTimer: number | null = null
 
 async function copyImage() {
+  if (!props.photo) return
   if (copyState.value === 'copying') return
   copyError.value = null
   copyState.value = 'copying'
   try {
-    const res = await fetch(src.value)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const sourceBlob = await res.blob()
-    const pngBlob = await encodePng(sourceBlob)
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+    await apiPost<{ copied: boolean }>('/api/clipboard/copy', { path: props.photo.Path })
     flashCopyState('copied')
-  } catch (err) {
-    copyError.value = friendlyError(err)
-    flashCopyState('error')
+    return
+  } catch (backendErr) {
+    try {
+      await copyImageViaCanvas(src.value)
+      flashCopyState('copied')
+      return
+    } catch {
+      copyError.value = friendlyError(backendErr)
+      flashCopyState('error')
+    }
   }
-}
-
-async function encodePng(source: Blob): Promise<Blob> {
-  const bitmap = await createImageBitmap(source)
-  const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('canvas 2d context unavailable')
-  ctx.drawImage(bitmap, 0, 0)
-  bitmap.close?.()
-  return await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('png encode failed'))),
-      'image/png',
-    )
-  })
 }
 
 function flashCopyState(next: 'copied' | 'error') {
@@ -114,11 +104,12 @@ function flashCopyState(next: 'copied' | 'error') {
   }, 1800)
 }
 
-const tagDraft = ref<string[]>(props.photo.Tags ?? [])
+const tagDraft = ref<string[]>(props.photo?.Tags ?? [])
 const tagError = ref<string | null>(null)
-watch(() => props.photo.Path, () => { tagDraft.value = props.photo.Tags ?? [] })
+watch(() => props.photo?.Path, () => { tagDraft.value = props.photo?.Tags ?? [] })
 
 async function commitTags(next: string[]) {
+  if (!props.photo) return
   tagError.value = null
   tagDraft.value = next
   try {
@@ -138,35 +129,64 @@ async function commitTags(next: string[]) {
 <template>
   <aside class="card bg-base-200 border border-base-300 w-80 shrink-0 flex-col overflow-hidden text-sm flex" aria-label="Photo details">
     <div class="flex items-center gap-2 border-b border-base-300 px-4 py-3">
-      <button type="button" class="btn btn-xs btn-square btn-ghost" aria-label="Close details" @click="emit('close')">✕</button>
-      <h2 class="truncate text-base font-semibold" :title="photo.Name">{{ photo.Name }}</h2>
+      <button
+        v-if="photo"
+        type="button"
+        class="btn btn-xs btn-square btn-ghost"
+        aria-label="Close details"
+        @click="emit('close')"
+      >✕</button>
+      <h2
+        v-if="photo"
+        class="truncate text-base font-semibold"
+        :title="photo.Name"
+      >{{ photo.Name }}</h2>
+      <h2
+        v-else
+        class="truncate text-base font-semibold text-base-content/50"
+      >No photo selected</h2>
     </div>
 
     <div class="flex max-h-[40vh] min-h-48 items-center justify-center border-b border-base-300 bg-base-300/30 p-4">
-      <video
-        v-if="video"
-        :src="src"
-        controls
-        preload="metadata"
-        class="max-h-full max-w-full rounded"
-      />
-      <img
+      <template v-if="photo">
+        <video
+          v-if="video"
+          :src="src"
+          controls
+          preload="metadata"
+          class="max-h-full max-w-full rounded"
+        />
+        <img
+          v-else
+          :src="src"
+          :alt="photo.Name"
+          class="max-h-full max-w-full object-contain rounded"
+        />
+      </template>
+      <svg
         v-else
-        :src="src"
-        :alt="photo.Name"
-        class="max-h-full max-w-full object-contain rounded"
-      />
+        width="48"
+        height="48"
+        viewBox="0 0 48 48"
+        fill="none"
+        aria-hidden="true"
+        class="text-base-content/20"
+      >
+        <rect x="6" y="10" width="36" height="28" rx="3" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="17" cy="21" r="3" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M6 32L18 22L28 30L36 24L42 28" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
     </div>
 
     <div
-      v-if="video && !capabilities.ffmpeg"
+      v-if="photo && video && !capabilities.ffmpeg"
       role="alert"
       class="alert alert-warning alert-soft mx-4 mt-3 text-xs"
     >
       ffmpeg not installed — thumbnails for videos are placeholders. Install ffmpeg and rescan to generate real previews.
     </div>
 
-    <div v-if="!video" class="flex flex-col gap-2 px-4 pt-3 pb-2">
+    <div v-if="photo && !video" class="flex flex-col gap-2 px-4 pt-3 pb-2">
       <button
         type="button"
         :class="[
@@ -187,12 +207,12 @@ async function commitTags(next: string[]) {
       <p v-if="copyError && copyState === 'error'" class="text-error text-xs" role="alert">{{ copyError }}</p>
     </div>
 
-    <div class="join px-4 pb-3">
+    <div v-if="photo" class="join px-4 pb-3">
       <button type="button" class="btn btn-sm btn-outline join-item flex-1" aria-label="Previous photo" @click="emit('prev')">← Prev</button>
       <button type="button" class="btn btn-sm btn-outline join-item flex-1" aria-label="Next photo" @click="emit('next')">Next →</button>
     </div>
 
-    <div class="flex flex-col gap-2 px-4 pb-3">
+    <div v-if="photo" class="flex flex-col gap-2 px-4 pb-3">
       <button type="button" class="btn btn-sm btn-outline" @click="previewOpen = true">Preview</button>
       <button type="button" class="btn btn-sm btn-outline" @click="revealInFolder">Show in folder</button>
       <p v-if="revealError" class="text-error text-xs" role="alert">{{ revealError }}</p>
@@ -215,17 +235,17 @@ async function commitTags(next: string[]) {
         <dt class="uppercase tracking-wider text-base-content/50 text-[10px] font-semibold">Modified</dt>
         <dd class="m-0 font-mono tabular-nums">{{ modifiedLabel }}</dd>
       </div>
-      <div v-if="photo.CameraMake" class="flex items-baseline justify-between gap-3">
+      <div v-if="photo?.CameraMake" class="flex items-baseline justify-between gap-3">
         <dt class="uppercase tracking-wider text-base-content/50 text-[10px] font-semibold">Camera</dt>
         <dd class="m-0 font-mono tabular-nums">{{ photo.CameraMake }}</dd>
       </div>
       <div class="flex items-baseline justify-between gap-3">
         <dt class="uppercase tracking-wider text-base-content/50 text-[10px] font-semibold">Path</dt>
-        <dd class="m-0 break-all font-mono text-[11px] text-base-content/70" :title="photo.Path">{{ photo.Path }}</dd>
+        <dd class="m-0 break-all font-mono text-[11px] text-base-content/70" :title="photo?.Path ?? ''">{{ photo?.Path ?? '—' }}</dd>
       </div>
     </dl>
 
-    <section class="px-4 py-3">
+    <section v-if="photo" class="px-4 py-3">
       <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-base-content/50">Tags</h3>
       <TagInput
         :model-value="tagDraft"
@@ -237,7 +257,7 @@ async function commitTags(next: string[]) {
     </section>
 
     <LightboxModal
-      v-if="previewOpen"
+      v-if="previewOpen && photo"
       :photo="photo"
       @close="previewOpen = false"
       @prev="emit('prev')"

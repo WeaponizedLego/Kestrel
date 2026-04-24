@@ -117,8 +117,22 @@ const viewerRef = ref<{ openPreview: () => void } | null>(null)
 // Sort + search controls. Server does the heavy lifting (see
 // CLAUDE.md: "No JS-side sorting or filtering"); the grid just
 // composes query params and debounces the search typing.
-const sortKey = ref<'name' | 'date' | 'size'>('name')
-const sortOrder = ref<'asc' | 'desc'>('asc')
+type SortKey = 'name' | 'date' | 'size'
+type SortOrder = 'asc' | 'desc'
+const SORT_KEY_STORAGE = 'kestrel.sortKey'
+const SORT_ORDER_STORAGE = 'kestrel.sortOrder'
+function loadSortKey(): SortKey {
+  if (typeof localStorage === 'undefined') return 'date'
+  const raw = localStorage.getItem(SORT_KEY_STORAGE)
+  return raw === 'name' || raw === 'date' || raw === 'size' ? raw : 'date'
+}
+function loadSortOrder(): SortOrder {
+  if (typeof localStorage === 'undefined') return 'desc'
+  const raw = localStorage.getItem(SORT_ORDER_STORAGE)
+  return raw === 'asc' || raw === 'desc' ? raw : 'desc'
+}
+const sortKey = ref<SortKey>(loadSortKey())
+const sortOrder = ref<SortOrder>(loadSortOrder())
 const searchTokens = ref<string[]>([])
 const searchMode = ref<'all' | 'any'>('all')
 const searchDebounced = ref('')
@@ -314,13 +328,6 @@ function imgSrc(path: string): string {
 
 function openAt(index: number) {
   if (index < 0 || index >= photos.value.length) return
-  const viewerWasClosed = viewerIndex.value < 0
-  // When the viewer panel first mounts, the scroller shrinks and the
-  // column count drops. updateMetrics' default behavior is to pin the
-  // top-visible photo, which can push the photo the user just clicked
-  // below the fold. Flag the next metrics tick to anchor on the opened
-  // photo instead.
-  if (viewerWasClosed) pendingScrollToIndex = index
   viewerIndex.value = index
   focused.value = index
   selectOnly(photos.value[index].Path)
@@ -356,9 +363,8 @@ function onCellClick(index: number, e: MouseEvent) {
 // streams the original file from /api/photo (not the thumbnail).
 async function onCellDblClick(index: number) {
   if (index < 0 || index >= photos.value.length) return
-  const wasClosed = viewerIndex.value < 0
   openAt(index)
-  if (wasClosed) await nextTick()
+  await nextTick()
   viewerRef.value?.openPreview()
 }
 
@@ -706,6 +712,9 @@ watch([sortKey, sortOrder, searchDebounced, searchMode, selectedFolder], () => {
   loadPhotos()
 })
 
+watch(sortKey, (v) => { try { localStorage.setItem(SORT_KEY_STORAGE, v) } catch {} })
+watch(sortOrder, (v) => { try { localStorage.setItem(SORT_ORDER_STORAGE, v) } catch {} })
+
 // When the user drags the size slider, anchor the top-visible photo so
 // resizing doesn't warp them to a different part of the library. We
 // snapshot the first on-screen photo index from the *old* pitch, then
@@ -773,6 +782,7 @@ watch(cellSize, (_newSize, oldSize) => {
       <div class="flex flex-wrap items-center gap-2">
         <TagInput
           v-model="searchTokens"
+          suggestions="search"
           class="flex-1 min-w-60"
           placeholder="Search name or tag…"
           aria-label="Search photos by name or tag"
@@ -878,6 +888,15 @@ watch(cellSize, (_newSize, oldSize) => {
               decoding="async"
             />
             <span
+              v-if="selectedPaths.has(cell.photo.Path)"
+              class="photo-grid__select-badge"
+              aria-label="Selected"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M3 7.5 L6 10.5 L11 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span
               v-if="isVideo(cell.photo)"
               class="photo-grid__video-badge"
               aria-label="Video"
@@ -907,7 +926,7 @@ watch(cellSize, (_newSize, oldSize) => {
         @clear="clearAllSelection"
       />
       <PhotoViewer
-        v-else-if="viewerPhoto"
+        v-else
         ref="viewerRef"
         :photo="viewerPhoto"
         @close="closeViewer"
@@ -948,25 +967,44 @@ watch(cellSize, (_newSize, oldSize) => {
   overflow: hidden;
   cursor: pointer;
   will-change: transform;
-  background: oklch(var(--b3) / 1);
+  background: var(--color-base-300);
 }
 .photo-grid__cell::after {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: inset 0 0 0 1px oklch(var(--bc) / 0.12);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--color-base-content) 12%, transparent);
   pointer-events: none;
   transition: box-shadow 120ms;
 }
 .photo-grid__cell:hover::after {
-  box-shadow: inset 0 0 0 1px oklch(var(--bc) / 0.25);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--color-base-content) 25%, transparent);
 }
 .photo-grid__cell--focused::after {
-  box-shadow: inset 0 0 0 2px oklch(var(--p) / 0.6);
+  box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--color-primary) 60%, transparent);
 }
 .photo-grid__cell--selected::after {
-  box-shadow: inset 0 0 0 2px oklch(var(--p) / 1);
+  box-shadow:
+    inset 0 0 0 4px var(--color-primary),
+    inset 0 0 0 5px color-mix(in oklch, var(--color-base-100) 90%, transparent);
+}
+.photo-grid__select-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  background: var(--color-primary);
+  color: var(--color-primary-content);
+  pointer-events: none;
+  box-shadow:
+    0 0 0 2px var(--color-base-100),
+    0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .photo-grid__video-badge {
   position: absolute;

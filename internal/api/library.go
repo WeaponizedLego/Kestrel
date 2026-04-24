@@ -55,6 +55,7 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/browse", h.browse)
 	mux.HandleFunc("/folders", h.folders)
 	mux.HandleFunc("/reveal", h.reveal)
+	mux.HandleFunc("/clipboard/copy", h.clipboardCopy)
 	mux.HandleFunc("/tags", h.setTags)
 	mux.HandleFunc("/folder-tags", h.addFolderTags)
 	mux.HandleFunc("/folder/remove", h.removeFolder)
@@ -520,6 +521,37 @@ func (h *LibraryHandler) reveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"revealed": true})
+}
+
+// clipboardCopy responds to POST /api/clipboard/copy by placing the
+// raw file bytes of the given photo onto the system clipboard with
+// the correct image MIME type. Unlike a browser canvas copy this
+// preserves animated GIF/WebP frames because the file is never
+// re-encoded. Path is gated through the library so callers can't push
+// arbitrary files onto the clipboard.
+func (h *LibraryHandler) clipboardCopy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req revealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if _, err := h.lib.GetPhoto(req.Path); err != nil {
+		writeError(w, http.StatusNotFound, "photo not in library")
+		return
+	}
+	if err := platform.CopyImageToClipboard(req.Path); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"copied": true})
 }
 
 // browseEntry is one row in a browse listing. Files are omitted;
