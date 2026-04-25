@@ -1,0 +1,3 @@
+# Keeps this directory tracked so //go:embed has something to embed
+# even before scripts/fetch-vision-models.sh runs. The actual .onnx
+# files land here post-fetch and are gitignored (see .gitignore).

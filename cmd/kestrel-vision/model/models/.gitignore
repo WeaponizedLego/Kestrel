@@ -1,0 +1,5 @@
+# Model weights are fetched on build, not committed. See
+# scripts/fetch-vision-models.sh for the download + verification
+# recipe. A clean checkout will not contain these files; the
+# fetch script and the CI build step drop them in.
+*.onnx

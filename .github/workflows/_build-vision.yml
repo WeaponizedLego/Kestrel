@@ -45,6 +45,23 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Fetch ONNX model weights
+        # Downloads SCRFD, ArcFace, YOLOv8n into
+        # cmd/kestrel-vision/model/models/ where //go:embed picks
+        # them up during `go build`. The script takes URLs from env
+        # vars because "the right mirror" drifts — pin them in repo
+        # secrets so workflow YAML never carries a URL that might
+        # 404. Fills in via GitHub Actions secrets:
+        #   KESTREL_SCRFD_URL    → InsightFace buffalo_m det_2.5g.onnx
+        #   KESTREL_ARCFACE_URL  → InsightFace antelopev2 glintr100.onnx
+        #   KESTREL_YOLO_URL     → yolov8n.onnx (Ultralytics export)
+        # Script is idempotent — a restored cache is a no-op.
+        env:
+          KESTREL_SCRFD_URL: ${{ secrets.KESTREL_SCRFD_URL }}
+          KESTREL_ARCFACE_URL: ${{ secrets.KESTREL_ARCFACE_URL }}
+          KESTREL_YOLO_URL: ${{ secrets.KESTREL_YOLO_URL }}
+        run: ./scripts/fetch-vision-models.sh
+
       - name: Vet sidecar
         run: go vet ./cmd/kestrel-vision/... ./internal/vision/...
 

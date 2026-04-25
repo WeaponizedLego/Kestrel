@@ -98,17 +98,3 @@ func defaultSharedLibraryPath() string {
 	return ""
 }
 
-// resolveModelPath returns modelsDir/name if modelsDir is set and the
-// file exists. Returns an error otherwise — Phase 2 will replace this
-// with //go:embed, at which point a missing file becomes impossible
-// for a released binary.
-func resolveModelPath(modelsDir, name string) (string, error) {
-	if modelsDir == "" {
-		return "", fmt.Errorf("--models dir not set; cannot locate %s (Phase 2 will embed)", name)
-	}
-	p := filepath.Join(modelsDir, name)
-	if _, err := os.Stat(p); err != nil {
-		return "", fmt.Errorf("locating %s in %s: %w", name, modelsDir, err)
-	}
-	return p, nil
-}

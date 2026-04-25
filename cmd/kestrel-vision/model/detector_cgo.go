@@ -57,9 +57,10 @@ type scrfdDetector struct {
 	mu      sync.Mutex
 }
 
-// OpenFaceDetector loads SCRFD-2.5G from modelsDir.
+// OpenFaceDetector loads SCRFD-2.5G. Model bytes come from modelsDir
+// when set; otherwise from the embedded copy.
 func OpenFaceDetector(modelsDir string) (FaceDetector, error) {
-	path, err := resolveModelPath(modelsDir, "scrfd_2.5g.onnx")
+	data, source, err := resolveModelBytes(modelsDir, "scrfd_2.5g.onnx")
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +112,8 @@ func OpenFaceDetector(modelsDir string) (FaceDetector, error) {
 		outputValues = append(outputValues, score, bbox, kps)
 	}
 
-	session, err := ort.NewAdvancedSession(
-		path,
+	session, err := ort.NewAdvancedSessionWithONNXData(
+		data,
 		[]string{"input.1"},
 		outputNames,
 		[]ort.Value{input},
@@ -122,7 +123,7 @@ func OpenFaceDetector(modelsDir string) (FaceDetector, error) {
 	if err != nil {
 		cleanupOutputs(outputs, input)
 		releaseEnvironment()
-		return nil, fmt.Errorf("creating scrfd session from %s: %w", path, err)
+		return nil, fmt.Errorf("creating scrfd session from %s: %w", source, err)
 	}
 	return &scrfdDetector{
 		session: session,

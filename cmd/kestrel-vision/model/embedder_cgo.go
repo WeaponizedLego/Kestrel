@@ -28,9 +28,11 @@ type arcfaceEmbedder struct {
 	                    // the backing tensors, so Embed must serialize.
 }
 
-// OpenFaceEmbedder loads ArcFace r100 (buffalo_l) from modelsDir.
+// OpenFaceEmbedder loads ArcFace r100 (buffalo_l). The model bytes
+// come from modelsDir when set; otherwise from the embedded copy
+// populated by scripts/fetch-vision-models.sh.
 func OpenFaceEmbedder(modelsDir string) (FaceEmbedder, error) {
-	path, err := resolveModelPath(modelsDir, "arcface_r100.onnx")
+	data, source, err := resolveModelBytes(modelsDir, "arcface_r100.onnx")
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +59,8 @@ func OpenFaceEmbedder(modelsDir string) (FaceEmbedder, error) {
 	// this load errors, the user's first clue is a meaningful
 	// "input not found" message from the runtime — we wrap it so
 	// they can see which model failed.
-	session, err := ort.NewAdvancedSession(
-		path,
+	session, err := ort.NewAdvancedSessionWithONNXData(
+		data,
 		[]string{"input.1"},
 		[]string{"683"},
 		[]ort.Value{input},
@@ -69,7 +71,7 @@ func OpenFaceEmbedder(modelsDir string) (FaceEmbedder, error) {
 		input.Destroy()
 		output.Destroy()
 		releaseEnvironment()
-		return nil, fmt.Errorf("creating arcface session from %s: %w", path, err)
+		return nil, fmt.Errorf("creating arcface session from %s: %w", source, err)
 	}
 	return &arcfaceEmbedder{
 		session: session,

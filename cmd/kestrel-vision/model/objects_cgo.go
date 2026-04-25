@@ -40,9 +40,10 @@ type yolov8Detector struct {
 	mu      sync.Mutex
 }
 
-// OpenObjectDetector loads YOLOv8n from modelsDir.
+// OpenObjectDetector loads YOLOv8n. Model bytes come from modelsDir
+// when set; otherwise from the embedded copy.
 func OpenObjectDetector(modelsDir string) (ObjectDetector, error) {
-	path, err := resolveModelPath(modelsDir, "yolov8n.onnx")
+	data, source, err := resolveModelBytes(modelsDir, "yolov8n.onnx")
 	if err != nil {
 		return nil, err
 	}
@@ -64,8 +65,8 @@ func OpenObjectDetector(modelsDir string) (ObjectDetector, error) {
 		return nil, fmt.Errorf("allocating yolov8 output tensor: %w", err)
 	}
 
-	session, err := ort.NewAdvancedSession(
-		path,
+	session, err := ort.NewAdvancedSessionWithONNXData(
+		data,
 		[]string{"images"},
 		[]string{"output0"},
 		[]ort.Value{input},
@@ -76,7 +77,7 @@ func OpenObjectDetector(modelsDir string) (ObjectDetector, error) {
 		input.Destroy()
 		output.Destroy()
 		releaseEnvironment()
-		return nil, fmt.Errorf("creating yolov8 session from %s: %w", path, err)
+		return nil, fmt.Errorf("creating yolov8 session from %s: %w", source, err)
 	}
 	return &yolov8Detector{
 		session: session,

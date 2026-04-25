@@ -64,15 +64,50 @@ Start it with `ORT_SHARED_LIBRARY=/path/to/libonnxruntime.so
 ./kestrel-vision --models /path/to/models-dir` once you have the three files.
 A missing model file errors out at startup with a clear message.
 
-## Phase 2 — Ship the weights
+## Phase 2 — Ship the weights  *(plumbing done; URLs/checksums need live pinning)*
 
-- [ ] `//go:embed` the three `.onnx` files from `cmd/kestrel-vision/models/`.
-      Document SHA-256 expected for each; reject mismatched bytes at startup
-      (`sha256.Sum256` check before opening the session).
-- [ ] `scripts/fetch-vision-models.sh` — downloads the three models to the
-      embed directory. Checksums committed inline.
-- [ ] `.gitignore` the `.onnx` files — they stay fetched, not committed.
-- [ ] CI step in `_build-vision.yml` that runs the fetch script before `go build`.
+- [x] `//go:embed` the three `.onnx` files from
+      `cmd/kestrel-vision/model/models/`. Uses `embed.FS`; a blank dir
+      (checkout before first fetch) doesn't break the build because
+      `README.md` is always embeddable.
+- [x] SHA-256 verification (`verifySHA`) with graceful degradation:
+      empty expected value skips the check, non-empty rejects mismatches.
+      `modelSHA` entries start blank; fill in after Phase 2 closes.
+- [x] `scripts/fetch-vision-models.sh` — idempotent, verifies SHA-256,
+      exits non-zero on placeholder hashes so a first-time run
+      announces loudly that the script needs real values filled in.
+- [x] `cmd/kestrel-vision/model/models/.gitignore` excludes `*.onnx`.
+- [x] Runtime override: `--models /path/to/dir` takes priority over
+      embedded copy so a dev can A/B-test a new model without rebuild.
+- [x] Tests: filesystem-wins-over-embedded, missing-everywhere error
+      message, SHA-256 skip + mismatch behaviour.
+- [x] `_build-vision.yml` runs the fetch script before `go build`.
+- [x] Script restructured to take URLs from env vars
+      (`KESTREL_SCRFD_URL`, `KESTREL_ARCFACE_URL`, `KESTREL_YOLO_URL`)
+      instead of hard-coded entries — "the right mirror" drifts over
+      time, and letting the build owner supply URLs via secrets keeps
+      the script from carrying stale links in git. Three modes: verify
+      if files present, fetch if URL supplied, print hints otherwise.
+- [ ] **Needs human + network:** pick mirrors for each of the three
+      models, stash the URLs as GitHub Actions repo secrets with the
+      names above, then run the fetch locally once to capture the
+      three SHA-256 values. Paste them into:
+      - `scripts/fetch-vision-models.sh` → expected-hash column
+      - `cmd/kestrel-vision/model/embed_cgo.go` → `modelSHA` map
+      Commit both together so every subsequent fetch/build enforces
+      the pinned checksums.
+
+**How to find the three models:**
+- **SCRFD-2.5G:** search HuggingFace for `buffalo_m` (the pack that
+  contains `det_2.5g.onnx` — NOT `buffalo_l` which has the bigger
+  `det_10g.onnx`). Prefer org mirrors (`immich-app/*`, `deepghs/*`)
+  over personal exports.
+- **ArcFace r100:** search HuggingFace for `antelopev2` (contains
+  `glintr100.onnx`, ~260 MB). The buffalo_l pack only has r50.
+- **YOLOv8n:** do not use random HF mirrors. Export yourself:
+  `pip install ultralytics && yolo export model=yolov8n.pt format=onnx
+  imgsz=640 opset=12`. This downloads Ultralytics' own weights and
+  produces a reproducible ONNX.
 
 ## Phase 3 — Flip CI to the real build
 
