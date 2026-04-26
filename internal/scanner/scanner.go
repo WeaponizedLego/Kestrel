@@ -211,6 +211,7 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 // total once enumeration is done. Stops early if ctx is cancelled or
 // filepath.WalkDir reports an error on the root itself.
 func walkPaths(ctx context.Context, root string, paths chan<- string) (int, error) {
+	slog.Info("scan walking root", "root", root)
 	var count int
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -230,6 +231,11 @@ func walkPaths(ctx context.Context, root string, paths chan<- string) (int, erro
 			return ctx.Err()
 		}
 	})
+	if err != nil {
+		slog.Info("scan walk ended", "root", root, "queued", count, "err", err)
+	} else {
+		slog.Info("scan walk complete", "root", root, "queued", count)
+	}
 	return count, err
 }
 
@@ -366,6 +372,7 @@ func publishProgress(opts Options, n int64, root string, discovered *atomic.Int6
 		Total:     total,
 		Root:      root,
 	})
+	slog.Debug("scan progress", "root", root, "processed", n, "total", total)
 }
 
 // storeThumbnail renders and stores a thumbnail when the scan was

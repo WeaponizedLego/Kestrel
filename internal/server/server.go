@@ -58,6 +58,11 @@ type Config struct {
 	// the frontend falls back to its built-in defaults.
 	SettingsHandler *api.SettingsHandler
 
+	// DebugHandler exposes /api/debug — log file path plus a tail of
+	// the active log. Optional: nil hides the endpoint, in which case
+	// the frontend's debug panel surfaces a "disabled" hint.
+	DebugHandler *api.DebugHandler
+
 	// Theme returns the currently-persisted theme name. Used by the
 	// asset handler to inject a <meta name="kestrel-theme"> tag into
 	// index.html so the daisyUI theme is applied before any JS runs.
@@ -121,6 +126,9 @@ func registerAPI(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.SettingsHandler != nil {
 		cfg.SettingsHandler.Register(apiMux)
+	}
+	if cfg.DebugHandler != nil {
+		cfg.DebugHandler.Register(apiMux)
 	}
 	mux.Handle("/api/", tokenMiddleware(cfg.Token, activityMiddleware(cfg.Activity, http.StripPrefix("/api", apiMux))))
 }

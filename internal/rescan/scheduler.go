@@ -128,12 +128,12 @@ func (s *Scheduler) cycle(ctx context.Context) {
 	if s.cfg.Activity != nil {
 		since := time.Since(s.cfg.Activity.LastActive())
 		if since < s.cfg.IdleThreshold {
-			slog.Debug("rescan: user active recently, skipping cycle", "since", since)
+			slog.Info("rescan: user active recently, skipping cycle", "since", since)
 			return
 		}
 	}
 	if id, _ := s.cfg.Runner.Active(); id != "" {
-		slog.Debug("rescan: scan already running, skipping cycle", "id", id)
+		slog.Info("rescan: scan already running, skipping cycle", "id", id)
 		return
 	}
 
@@ -141,6 +141,7 @@ func (s *Scheduler) cycle(ctx context.Context) {
 	sort.Slice(roots, func(i, j int) bool {
 		return roots[i].LastScannedAt.Before(roots[j].LastScannedAt)
 	})
+	slog.Info("rescan cycle starting", "roots", len(roots))
 
 	for _, root := range roots {
 		if ctx.Err() != nil {
@@ -195,6 +196,7 @@ func (s *Scheduler) rescanOne(ctx context.Context, root string) {
 	if err := s.cfg.Roots.MarkScanned(root, time.Now()); err != nil {
 		slog.Warn("rescan: marking root scanned failed", "root", root, "err", err)
 	}
+	slog.Info("rescan root finished", "root", root, "pruned", len(removed))
 }
 
 // fileExists mirrors the semantics used by /api/resync: any non-

@@ -75,7 +75,8 @@ func main() {
 	debug := flag.Bool("debug", false, "enable debug-level logging")
 	flag.Parse()
 
-	initLogging(*debug)
+	logPath, closeLog := initLogging(*debug)
+	defer closeLog()
 
 	bind := *addr
 	if bind == "" {
@@ -86,26 +87,59 @@ func main() {
 		}
 	}
 
-	if err := run(*dev, bind); err != nil {
+	if err := run(*dev, bind, logPath); err != nil {
 		slog.Error("kestrel exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
 // initLogging installs a text-format slog handler on the default
-// logger. Text beats JSON for local developer output; switch to JSON
-// later if we ship a log-collector.
-func initLogging(debug bool) {
+// logger that fans out to both stderr and a size-rotated file under
+// the user's config directory (kestrel.log, with one rolled backup at
+// kestrel.log.1). Text beats JSON for local developer output; switch
+// to JSON later if we ship a log-collector.
+//
+// Returns the resolved log file path (empty when the file could not
+// be opened) and a closer that flushes and releases the log file on
+// shutdown. A failure to open the log file is non-fatal — we warn to
+// stderr and fall back to stderr-only logging so the app stays usable.
+func initLogging(debug bool) (string, func()) {
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(handler))
+	opts := &slog.HandlerOptions{Level: level}
+
+	stderrHandler := slog.NewTextHandler(os.Stderr, opts)
+
+	logPath, err := platform.LogPath()
+	if err != nil {
+		slog.SetDefault(slog.New(stderrHandler))
+		slog.Warn("resolving log path failed; logging to stderr only", "err", err)
+		return "", func() {}
+	}
+
+	rf, err := openRotatingFile(logPath, logRotateSize)
+	if err != nil {
+		slog.SetDefault(slog.New(stderrHandler))
+		slog.Warn("opening log file failed; logging to stderr only", "path", logPath, "err", err)
+		return "", func() {}
+	}
+
+	fileHandler := slog.NewTextHandler(rf, opts)
+	slog.SetDefault(slog.New(newMultiHandler(stderrHandler, fileHandler)))
+	slog.Info("kestrel starting", "log_path", logPath, "level", level.String(), "rotate_at", logRotateSize)
+	return logPath, func() {
+		if err := rf.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "kestrel: closing log file: %v\n", err)
+		}
+	}
 }
 
 // run wires the server and blocks until a shutdown signal arrives.
-func run(devMode bool, bind string) error {
+// logPath is the resolved kestrel.log path (empty if file logging is
+// disabled) — passed through to the debug API handler.
+func run(devMode bool, bind string, logPath string) error {
 	lib := library.New()
 
 	metaPath, err := platform.LibraryMetaPath()
@@ -208,6 +242,7 @@ func run(devMode bool, bind string) error {
 	taggingHandler := api.NewTaggingHandler(lib, clusterMgr, hub)
 	capabilitiesHandler := api.NewCapabilitiesHandler()
 	settingsHandler := api.NewSettingsHandler(settingsStore)
+	debugHandler := api.NewDebugHandler(logPath)
 
 	// File operations: journal is write-ahead, trash is Kestrel-managed.
 	// Recovery runs before the HTTP server starts so any in-flight op
@@ -295,6 +330,7 @@ func run(devMode bool, bind string) error {
 		FileOpsHandler:      fileOpsHandler,
 		CapabilitiesHandler: capabilitiesHandler,
 		SettingsHandler:     settingsHandler,
+		DebugHandler:        debugHandler,
 		Theme:               func() string { return settingsStore.Get().Theme },
 		Hub:                 hub,
 		Activity:            activity,

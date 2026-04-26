@@ -60,6 +60,14 @@ func WatchedRootsPath() (string, error) {
 	return appDataPath("watched_roots.json")
 }
 
+// LogPath returns the absolute path of kestrel.log under the user's
+// config directory. Lives next to library_meta.gob so the user has
+// one place to look for app data; the rotated backup is written as
+// kestrel.log.1 in the same directory.
+func LogPath() (string, error) {
+	return appDataPath("kestrel.log")
+}
+
 // TrashRootPath returns the absolute path of the Kestrel-managed
 // trash directory. Like library_meta.gob this is user data the app
 // must not silently lose; a future purge/retention job can prune it.

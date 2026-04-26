@@ -153,6 +153,7 @@ func (r *Runner) start(root, intensity string, opts Options, preempt bool) (stri
 		"root":      root,
 		"intensity": intensity,
 	})
+	slog.Info("scan started", "id", id, "root", root, "intensity", intensity)
 	go r.run(ctx, id, root, intensity, opts, handle)
 	return id, nil
 }
@@ -246,8 +247,10 @@ func (r *Runner) Shutdown() {
 // run is the body of the background goroutine: invoke Scan, publish
 // the terminal events, clear active, run OnFinish.
 func (r *Runner) run(ctx context.Context, id, root, intensity string, opts Options, handle *scanHandle) {
+	start := time.Now()
 	added, err := Scan(ctx, root, r.lib, opts)
 	cancelled := ctx.Err() != nil
+	duration := time.Since(start)
 
 	r.mu.Lock()
 	r.active = nil
@@ -265,6 +268,14 @@ func (r *Runner) run(ctx context.Context, id, root, intensity string, opts Optio
 		slog.Error("scan failed", "root", root, "err", err)
 	}
 	r.publish("scan:done", payload)
+	slog.Info("scan finished",
+		"id", id,
+		"root", root,
+		"intensity", intensity,
+		"added", added,
+		"cancelled", cancelled,
+		"duration", duration,
+	)
 	// library:updated is the "refresh your view" event — published
 	// separately so future non-scan mutations can reuse it.
 	r.publish("library:updated", map[string]int{
