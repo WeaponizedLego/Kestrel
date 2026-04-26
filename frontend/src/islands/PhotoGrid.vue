@@ -25,6 +25,8 @@ import {
 } from '../transport/selection'
 import { resyncing, runResync } from '../transport/resync'
 import { requestedSearchTokens } from '../transport/search'
+import { copyImageToClipboard } from '../transport/clipboard'
+import { requestDelete, requestMove } from '../transport/fileops'
 import type { Photo } from '../types'
 import { isVideo } from '../util/media'
 
@@ -321,6 +323,7 @@ function scheduleViewportPrefetch() {
 function onScroll() {
   updateMetrics()
   scheduleViewportPrefetch()
+  if (ctxOpen.value) closeCtxMenu()
 }
 
 function imgSrc(path: string): string {
@@ -371,6 +374,90 @@ async function onCellDblClick(index: number) {
   openAt(index)
   await nextTick()
   viewerRef.value?.openPreview()
+}
+
+// Right-click context menu. Mirrors the file-manager convention: if
+// the right-clicked photo is part of the current multi-selection the
+// menu acts on the whole selection; otherwise it collapses selection
+// to that one photo. Move/Delete dispatch through the FileOps island
+// (folder picker, confirm modal, undo toast all live there).
+const ctxOpen = ref(false)
+const ctxX = ref(0)
+const ctxY = ref(0)
+const ctxIndex = ref(-1)
+const ctxTargets = ref<string[]>([])
+const ctxIsVideo = ref(false)
+const ctxSingle = computed(() => ctxTargets.value.length === 1)
+const ctxCopyError = ref<string | null>(null)
+
+function openCtxMenu(index: number, e: MouseEvent) {
+  if (index < 0 || index >= photos.value.length) return
+  e.preventDefault()
+  const photo = photos.value[index]
+  const path = photo.Path
+  if (selectedPaths.value.has(path) && selectedPaths.value.size > 1) {
+    const ordered: string[] = []
+    for (const p of photos.value) {
+      if (selectedPaths.value.has(p.Path)) ordered.push(p.Path)
+    }
+    ctxTargets.value = ordered
+  } else {
+    selectOnly(path)
+    viewerIndex.value = -1
+    focused.value = index
+    ctxTargets.value = [path]
+  }
+  ctxIndex.value = index
+  ctxIsVideo.value = isVideo(photo)
+  ctxX.value = e.clientX
+  ctxY.value = e.clientY
+  ctxCopyError.value = null
+  ctxOpen.value = true
+}
+
+function closeCtxMenu() {
+  ctxOpen.value = false
+  ctxCopyError.value = null
+}
+
+async function ctxPreview() {
+  if (!ctxSingle.value) return
+  const idx = ctxIndex.value
+  closeCtxMenu()
+  if (idx < 0 || idx >= photos.value.length) return
+  openAt(idx)
+  await nextTick()
+  viewerRef.value?.openPreview()
+}
+
+async function ctxCopy() {
+  if (!ctxSingle.value || ctxIsVideo.value) return
+  const path = ctxTargets.value[0]
+  try {
+    await copyImageToClipboard(path)
+    closeCtxMenu()
+  } catch (err) {
+    ctxCopyError.value = friendlyError(err)
+  }
+}
+
+function ctxMove() {
+  if (ctxTargets.value.length === 0) return
+  requestMove([...ctxTargets.value])
+  closeCtxMenu()
+}
+
+function ctxDelete() {
+  if (ctxTargets.value.length === 0) return
+  requestDelete([...ctxTargets.value])
+  closeCtxMenu()
+}
+
+function onCtxKey(e: KeyboardEvent) {
+  if (ctxOpen.value && e.key === 'Escape') {
+    e.stopPropagation()
+    closeCtxMenu()
+  }
 }
 
 // multiSelection photos — the panel switches to SelectionSummary when
@@ -663,6 +750,8 @@ watch(scroller, (el) => {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('keydown', onCtxKey, true)
+  window.addEventListener('blur', closeCtxMenu)
   unsubThumb = onThumbnailReady((path) => {
     touchedPaths.add(path)
     thumbVersion.value++
@@ -702,6 +791,8 @@ async function probeScanStatus() {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onCtxKey, true)
+  window.removeEventListener('blur', closeCtxMenu)
   unsubThumb?.()
   unsubLibrary?.()
   unsubScanStart?.()
@@ -891,6 +982,7 @@ watch(cellSize, (_newSize, oldSize) => {
             :data-index="cell.index"
             @click="onCellClick(cell.index, $event)"
             @dblclick.stop="onCellDblClick(cell.index)"
+            @contextmenu="openCtxMenu(cell.index, $event)"
             @focus="focused = cell.index"
           >
             <img
@@ -955,6 +1047,37 @@ watch(cellSize, (_newSize, oldSize) => {
         @choose="onPickerChoose"
         @close="closePicker"
       />
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="ctxOpen"
+        class="fixed inset-0 z-[999]"
+        @click="closeCtxMenu"
+        @contextmenu.prevent="closeCtxMenu"
+      />
+      <ul
+        v-if="ctxOpen"
+        class="menu menu-sm bg-base-200 rounded-box fixed z-[1000] w-56 p-2 shadow-xl"
+        :style="{ left: ctxX + 'px', top: ctxY + 'px' }"
+        role="menu"
+        @click.stop
+      >
+        <li v-if="ctxTargets.length > 1" class="menu-title">
+          <span>{{ ctxTargets.length }} photos selected</span>
+        </li>
+        <li :class="ctxSingle ? '' : 'disabled'">
+          <button type="button" role="menuitem" :disabled="!ctxSingle" @click="ctxPreview">Preview</button>
+        </li>
+        <li :class="(ctxSingle && !ctxIsVideo) ? '' : 'disabled'">
+          <button type="button" role="menuitem" :disabled="!ctxSingle || ctxIsVideo" @click="ctxCopy">Copy image</button>
+        </li>
+        <li><button type="button" role="menuitem" @click="ctxMove">Move…</button></li>
+        <li><button type="button" role="menuitem" class="text-error" @click="ctxDelete">Delete</button></li>
+        <li v-if="ctxCopyError" class="px-2 pt-1">
+          <span class="text-error text-xs" role="alert">{{ ctxCopyError }}</span>
+        </li>
+      </ul>
     </Teleport>
   </section>
 </template>

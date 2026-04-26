@@ -189,18 +189,22 @@ func TestLibrary_AllTags(t *testing.T) {
 	lib.AddPhoto(&Photo{Path: "/c.jpg", Name: "c.jpg", Tags: []string{"dog"}})
 
 	stats := lib.AllTags()
-	if len(stats) != 3 {
-		t.Fatalf("AllTags() returned %d entries, want 3", len(stats))
+	// Synthetic "untagged" system entry leads, followed by sorted user
+	// tags. No untagged photos in this fixture, so its count is zero.
+	if len(stats) != 4 {
+		t.Fatalf("AllTags() returned %d entries, want 4", len(stats))
 	}
-	// Sorted by name.
-	if stats[0].Name != "cats" || stats[0].Count != 2 {
-		t.Fatalf("stats[0] = %+v, want cats:2", stats[0])
+	if stats[0].Name != UntaggedTag || stats[0].Kind != TagKindSystem || stats[0].Count != 0 {
+		t.Fatalf("stats[0] = %+v, want untagged:0 system", stats[0])
 	}
-	if stats[1].Name != "cute" || stats[1].Count != 1 {
-		t.Fatalf("stats[1] = %+v, want cute:1", stats[1])
+	if stats[1].Name != "cats" || stats[1].Count != 2 {
+		t.Fatalf("stats[1] = %+v, want cats:2", stats[1])
 	}
-	if stats[2].Name != "dog" || stats[2].Count != 1 {
-		t.Fatalf("stats[2] = %+v, want dog:1", stats[2])
+	if stats[2].Name != "cute" || stats[2].Count != 1 {
+		t.Fatalf("stats[2] = %+v, want cute:1", stats[2])
+	}
+	if stats[3].Name != "dog" || stats[3].Count != 1 {
+		t.Fatalf("stats[3] = %+v, want dog:1", stats[3])
 	}
 	// AutoTags must not leak into the count.
 	for _, s := range stats {
@@ -218,18 +222,22 @@ func TestLibrary_AllTagsFiltered_HiddenAndAuto(t *testing.T) {
 		t.Fatalf("SetTagHidden: %v", err)
 	}
 
-	// Default view: wip is hidden, auto is excluded.
+	// Default view: wip is hidden, auto is excluded. The synthetic
+	// "untagged" system entry always rides at index 0.
 	stats := lib.AllTagsFiltered(false, false)
-	if len(stats) != 1 || stats[0].Name != "cats" {
-		t.Fatalf("default: got %+v, want only cats", stats)
+	if len(stats) != 2 || stats[0].Kind != TagKindSystem || stats[1].Name != "cats" {
+		t.Fatalf("default: got %+v, want untagged + cats", stats)
 	}
 
 	// Include hidden only.
 	stats = lib.AllTagsFiltered(true, false)
-	if len(stats) != 2 {
-		t.Fatalf("hidden-on: got %d, want 2 (%+v)", len(stats), stats)
+	if len(stats) != 3 {
+		t.Fatalf("hidden-on: got %d, want 3 (%+v)", len(stats), stats)
 	}
 	for _, s := range stats {
+		if s.Kind == TagKindSystem {
+			continue
+		}
 		if s.Kind != TagKindUser {
 			t.Errorf("expected Kind=user, got %q", s.Kind)
 		}

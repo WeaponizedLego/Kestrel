@@ -46,6 +46,14 @@ export interface TagCluster {
   untagged: number
 }
 
+// ClusterKind selects which view of similarity the API returns.
+//   duplicate — perceptual hash within tight Hamming radius (the
+//               original "duplicates" view).
+//   similar   — perceptual hash within a looser radius.
+//   exact     — byte-identical (same SHA-256). The "true duplicates"
+//               toggle in the duplicates UI.
+export type ClusterKind = 'duplicate' | 'similar' | 'exact'
+
 // TaggingProgress mirrors cluster.Progress. Powers the HUD at the
 // top of the Tagging Queue island.
 export interface TaggingProgress {

@@ -97,4 +97,5 @@ PRs only; direct pushes to `develop` and `main` are blocked. Both checks are req
 - `docs/ui-design.md` — Vue 3 + Vite island hydration, REST/WS transport, component hierarchy, thumbnail strategy, frontend performance rules
 - `docs/go-readability.md` — Go style, naming, comments, error handling, interfaces, tests, file organization
 - `docs/assisted-tagging.md` — EXIF auto-tags, pHash clustering, Tagging Queue UX for fresh libraries
+- `SCANNER_BEHAVIOR.md` — initial scan vs. user re-scan vs. background scheduler; nesting rules, pruning scope, preemption
 - `.github/copilot-instructions.md` — the same "video game architecture" and transport rules, condensed for Copilot

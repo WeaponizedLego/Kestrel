@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiGet, friendlyError } from '../transport/api'
 
-interface BrowseEntry { name: string; path: string }
+interface BrowseEntry { name: string; path: string; has_children: boolean }
 interface BrowseResponse { path: string; parent: string; entries: BrowseEntry[] }
 
 const props = defineProps<{ initialPath?: string }>()
@@ -79,6 +79,13 @@ watch(() => props.initialPath, (v) => { if (v) navigate(v) })
                 <path d="M1.5 3.5C1.5 2.9 1.9 2.5 2.5 2.5H5.5L7 4H11.5C12.1 4 12.5 4.4 12.5 5V10.5C12.5 11.1 12.1 11.5 11.5 11.5H2.5C1.9 11.5 1.5 11.1 1.5 10.5V3.5Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
               </svg>
               <span class="truncate">{{ entry.name }}</span>
+              <svg
+                v-if="entry.has_children"
+                width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true"
+                class="ms-auto shrink-0 opacity-50"
+              >
+                <path d="M2.5 1.5L5.5 4L2.5 6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
             </button>
           </li>
         </ul>

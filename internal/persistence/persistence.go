@@ -37,7 +37,11 @@ const magic = "KSTL"
 // v3: appends a []string of hidden tag names (library-level, not per
 //     photo). v1/v2 payloads load cleanly with an empty hidden set;
 //     next Save rewrites as v3.
-const CurrentVersion uint32 = 3
+// v4: appends a []string of dismissed cluster fingerprints (the set of
+//     similarity groups the user marked "not a duplicate"). v1–v3
+//     payloads load with an empty dismissed set; next Save rewrites
+//     as v4.
+const CurrentVersion uint32 = 4
 
 // header is the first gob-encoded value in every metadata file. Kept
 // deliberately small so a future migration can read it without
@@ -65,11 +69,11 @@ func isSupportedVersion(v uint32) bool {
 	return v >= 1 && v <= CurrentVersion
 }
 
-// Save writes photos and the hidden-tag set to path atomically: it
-// encodes to a sibling "<path>.tmp" file first, fsyncs, then renames
-// over the destination. That way a crash mid-write leaves the
-// previous good file untouched.
-func Save(path string, photos []*library.Photo, hiddenTags []string) error {
+// Save writes photos, the hidden-tag set, and the dismissed-cluster
+// set to path atomically: it encodes to a sibling "<path>.tmp" file
+// first, fsyncs, then renames over the destination. That way a crash
+// mid-write leaves the previous good file untouched.
+func Save(path string, photos []*library.Photo, hiddenTags []string, dismissedClusters []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating metadata dir for %s: %w", path, err)
 	}
@@ -101,6 +105,17 @@ func Save(path string, photos []*library.Photo, hiddenTags []string) error {
 		f.Close()
 		return fmt.Errorf("encoding hidden tags to %s: %w", tmp, err)
 	}
+	// Dismissed clusters land in a separate gob value, same pattern as
+	// hidden tags: appended last so older binaries that stop after the
+	// hidden-tag slice don't trip on the new field. Always written —
+	// even as an empty slice — so the v4 shape is uniform.
+	if dismissedClusters == nil {
+		dismissedClusters = []string{}
+	}
+	if err := enc.Encode(dismissedClusters); err != nil {
+		f.Close()
+		return fmt.Errorf("encoding dismissed clusters to %s: %w", tmp, err)
+	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return fmt.Errorf("flushing %s: %w", tmp, err)
@@ -114,19 +129,20 @@ func Save(path string, photos []*library.Photo, hiddenTags []string) error {
 	return nil
 }
 
-// Load reads photos and hidden tags from path. A missing file is not
-// an error — it returns (nil, nil, nil) so a first-run binary can
-// carry on with an empty library. A present-but-corrupt file or a
-// version mismatch returns a wrapped error; the caller decides
-// whether to keep going or abort. v1/v2 payloads decode with an empty
-// hidden-tag slice (the field didn't exist yet).
-func Load(path string) ([]*library.Photo, []string, error) {
+// Load reads photos, hidden tags, and dismissed clusters from path. A
+// missing file is not an error — it returns (nil, nil, nil, nil) so a
+// first-run binary can carry on with an empty library. A
+// present-but-corrupt file or a version mismatch returns a wrapped
+// error; the caller decides whether to keep going or abort. v1/v2
+// payloads decode with empty hidden-tag and dismissed-cluster slices;
+// v3 payloads decode with an empty dismissed-cluster slice.
+func Load(path string) ([]*library.Photo, []string, []string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("opening %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -134,26 +150,33 @@ func Load(path string) ([]*library.Photo, []string, error) {
 
 	var h header
 	if err := dec.Decode(&h); err != nil {
-		return nil, nil, fmt.Errorf("decoding header from %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("decoding header from %s: %w", path, err)
 	}
 	if h.Magic != magic {
-		return nil, nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
+		return nil, nil, nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
 	}
 	if !isSupportedVersion(h.Version) {
-		return nil, nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
+		return nil, nil, nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
 			path, h.Version, CurrentVersion, ErrUnknownVersion)
 	}
 
 	var photos []*library.Photo
 	if err := dec.Decode(&photos); err != nil {
-		return nil, nil, fmt.Errorf("decoding photos from %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("decoding photos from %s: %w", path, err)
 	}
 
 	var hidden []string
 	if h.Version >= 3 {
 		if err := dec.Decode(&hidden); err != nil {
-			return nil, nil, fmt.Errorf("decoding hidden tags from %s: %w", path, err)
+			return nil, nil, nil, fmt.Errorf("decoding hidden tags from %s: %w", path, err)
 		}
 	}
-	return photos, hidden, nil
+
+	var dismissed []string
+	if h.Version >= 4 {
+		if err := dec.Decode(&dismissed); err != nil {
+			return nil, nil, nil, fmt.Errorf("decoding dismissed clusters from %s: %w", path, err)
+		}
+	}
+	return photos, hidden, dismissed, nil
 }

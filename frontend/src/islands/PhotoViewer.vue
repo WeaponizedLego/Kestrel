@@ -2,9 +2,10 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import { useCapabilities } from '../transport/capabilities'
+import { copyImageToClipboard } from '../transport/clipboard'
+import { requestDelete, requestMove } from '../transport/fileops'
 import type { Photo } from '../types'
 import { isVideo } from '../util/media'
-import { copyImageViaCanvas } from '../util/clipboardFallback'
 
 const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
 const LightboxModal = defineAsyncComponent(() => import('../components/LightboxModal.vue'))
@@ -80,19 +81,22 @@ async function copyImage() {
   copyError.value = null
   copyState.value = 'copying'
   try {
-    await apiPost<{ copied: boolean }>('/api/clipboard/copy', { path: props.photo.Path })
+    await copyImageToClipboard(props.photo.Path)
     flashCopyState('copied')
-    return
-  } catch (backendErr) {
-    try {
-      await copyImageViaCanvas(src.value)
-      flashCopyState('copied')
-      return
-    } catch {
-      copyError.value = friendlyError(backendErr)
-      flashCopyState('error')
-    }
+  } catch (err) {
+    copyError.value = friendlyError(err)
+    flashCopyState('error')
   }
+}
+
+function onMove() {
+  if (!props.photo) return
+  requestMove([props.photo.Path])
+}
+
+function onDelete() {
+  if (!props.photo) return
+  requestDelete([props.photo.Path])
 }
 
 function flashCopyState(next: 'copied' | 'error') {
@@ -212,13 +216,26 @@ async function commitTags(next: string[]) {
       <button type="button" class="btn btn-sm btn-outline join-item flex-1" aria-label="Next photo" @click="emit('next')">Next →</button>
     </div>
 
-    <div v-if="photo" class="flex flex-col gap-2 px-4 pb-3">
+    <section v-if="photo" class="border-b border-base-300 px-4 py-3">
+      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-base-content/50">Tags</h3>
+      <TagInput
+        :model-value="tagDraft"
+        placeholder="Add tag…"
+        aria-label="Edit photo tags"
+        @update:model-value="commitTags"
+      />
+      <p v-if="tagError" class="text-error text-xs mt-1" role="alert">{{ tagError }}</p>
+    </section>
+
+    <div v-if="photo" class="flex flex-col gap-2 px-4 py-3">
       <button type="button" class="btn btn-sm btn-outline" @click="previewOpen = true">Preview</button>
       <button type="button" class="btn btn-sm btn-outline" @click="revealInFolder">Show in folder</button>
+      <button type="button" class="btn btn-sm btn-outline" @click="onMove">Move…</button>
+      <button type="button" class="btn btn-sm btn-outline btn-error" @click="onDelete">Delete</button>
       <p v-if="revealError" class="text-error text-xs" role="alert">{{ revealError }}</p>
     </div>
 
-    <dl class="flex flex-col gap-2 overflow-y-auto border-y border-base-300 px-4 py-3 text-xs">
+    <dl class="flex flex-col gap-2 overflow-y-auto border-t border-base-300 px-4 py-3 text-xs">
       <div class="flex items-baseline justify-between gap-3">
         <dt class="uppercase tracking-wider text-base-content/50 text-[10px] font-semibold">Dimensions</dt>
         <dd class="m-0 font-mono tabular-nums">{{ dims }}</dd>
@@ -244,17 +261,6 @@ async function commitTags(next: string[]) {
         <dd class="m-0 break-all font-mono text-[11px] text-base-content/70" :title="photo?.Path ?? ''">{{ photo?.Path ?? '—' }}</dd>
       </div>
     </dl>
-
-    <section v-if="photo" class="px-4 py-3">
-      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-base-content/50">Tags</h3>
-      <TagInput
-        :model-value="tagDraft"
-        placeholder="Add tag…"
-        aria-label="Edit photo tags"
-        @update:model-value="commitTags"
-      />
-      <p v-if="tagError" class="text-error text-xs mt-1" role="alert">{{ tagError }}</p>
-    </section>
 
     <LightboxModal
       v-if="previewOpen && photo"

@@ -1,12 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
+	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
 
 func TestFolders_TreeFromLivePhotos(t *testing.T) {
@@ -105,6 +109,170 @@ func TestPhotos_FolderFilter(t *testing.T) {
 		if p.Path == "/mnt/b/three.jpg" {
 			t.Errorf("folder filter leaked unrelated photo: %s", p.Path)
 		}
+	}
+}
+
+func TestCreateFolder(t *testing.T) {
+	tmp := t.TempDir()
+	roots, err := watchroots.Open(filepath.Join(t.TempDir(), "watchroots.json"))
+	if err != nil {
+		t.Fatalf("open watchroots: %v", err)
+	}
+	if err := roots.Upsert(tmp); err != nil {
+		t.Fatalf("upsert root: %v", err)
+	}
+
+	h := NewLibraryHandler(library.New(), nil, nil, nil, roots)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	post := func(body any) *httptest.ResponseRecorder {
+		buf, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/folder/create", bytes.NewReader(buf))
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("success", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": "fresh"})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(filepath.Join(tmp, "fresh")); err != nil {
+			t.Fatalf("expected fresh dir to exist: %v", err)
+		}
+	})
+
+	t.Run("duplicate", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": "fresh"})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409", rec.Code)
+		}
+	})
+
+	t.Run("missing parent", func(t *testing.T) {
+		rec := post(map[string]string{"parent": "", "name": "x"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("relative parent", func(t *testing.T) {
+		rec := post(map[string]string{"parent": "rel/path", "name": "x"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("empty name", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": "  "})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("name with separator", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": "a/b"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("traversal name", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": ".."})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("dot prefix", func(t *testing.T) {
+		rec := post(map[string]string{"parent": tmp, "name": ".hidden"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("outside watched root", func(t *testing.T) {
+		other := t.TempDir()
+		rec := post(map[string]string{"parent": other, "name": "x"})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+	})
+}
+
+func TestCreateFolder_KnownByLibraryPhoto(t *testing.T) {
+	// Parent isn't a watched root, but a photo lives under it — that's
+	// enough to count as "known", which matches what the sidebar shows.
+	tmp := t.TempDir()
+	indexed := filepath.Join(tmp, "indexed")
+	if err := os.MkdirAll(indexed, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	lib := library.New()
+	lib.AddPhoto(&library.Photo{Path: filepath.Join(indexed, "p.jpg"), Name: "p.jpg"})
+
+	roots, err := watchroots.Open(filepath.Join(t.TempDir(), "watchroots.json"))
+	if err != nil {
+		t.Fatalf("open watchroots: %v", err)
+	}
+	// Deliberately empty watched-root list.
+
+	h := NewLibraryHandler(lib, nil, nil, nil, roots)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body, _ := json.Marshal(map[string]string{"parent": indexed, "name": "new"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/folder/create", bytes.NewReader(body))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(indexed, "new")); err != nil {
+		t.Fatalf("expected new dir: %v", err)
+	}
+}
+
+func TestBrowse_HasChildren(t *testing.T) {
+	root := t.TempDir()
+	leaf := filepath.Join(root, "leaf")
+	parent := filepath.Join(root, "parent")
+	nested := filepath.Join(parent, "nested")
+	for _, d := range []string{leaf, parent, nested} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	h := NewLibraryHandler(library.New(), nil, nil, nil, nil)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/browse?path="+root, nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Entries []browseEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := map[string]bool{}
+	for _, e := range resp.Entries {
+		got[e.Name] = e.HasChildren
+	}
+	if hc, ok := got["leaf"]; !ok || hc {
+		t.Errorf("leaf: has_children=%v ok=%v, want false present", hc, ok)
+	}
+	if hc, ok := got["parent"]; !ok || !hc {
+		t.Errorf("parent: has_children=%v ok=%v, want true present", hc, ok)
 	}
 }
 

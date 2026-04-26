@@ -5,7 +5,7 @@ import { onEvent } from '../transport/events'
 import { onOpenTagManager } from '../transport/tagging'
 import { requestSearchTokens } from '../transport/search'
 
-interface TagStat { name: string; count: number; kind: 'user' | 'auto'; hidden: boolean }
+interface TagStat { name: string; count: number; kind: 'user' | 'auto' | 'system'; hidden: boolean }
 
 type Pending =
   | { kind: 'idle' }
@@ -27,6 +27,10 @@ const filtered = computed<TagStat[]>(() => {
   if (q === '') return tags.value
   return tags.value.filter((t) => t.name.includes(q))
 })
+
+const hasUserOrAutoTags = computed<boolean>(() =>
+  tags.value.some((t) => t.kind !== 'system'),
+)
 
 async function refresh(): Promise<void> {
   loading.value = true
@@ -180,7 +184,7 @@ onUnmounted(() => {
 
       <div class="flex-1 overflow-y-auto">
         <div v-if="loading && tags.length === 0" class="p-4 text-sm text-base-content/60">Loading tags…</div>
-        <div v-else-if="!loading && tags.length === 0" class="p-4 text-sm text-base-content/60">
+        <div v-else-if="!loading && !hasUserOrAutoTags" class="p-4 text-sm text-base-content/60">
           No user tags yet. Tag some photos to build your vocabulary.
         </div>
         <div v-else-if="filtered.length === 0" class="p-4 text-sm text-base-content/60">
@@ -250,15 +254,16 @@ onUnmounted(() => {
                 >
                   {{ t.name }}
                 </button>
-                <span v-if="t.kind === 'auto'" class="badge badge-ghost badge-xs">auto</span>
+                <span v-if="t.kind === 'system'" class="badge badge-info badge-xs">system</span>
+                <span v-else-if="t.kind === 'auto'" class="badge badge-ghost badge-xs">auto</span>
                 <span v-else-if="t.hidden" class="badge badge-ghost badge-xs">hidden</span>
               </span>
               <span class="text-[10px] uppercase tracking-wider tabular-nums text-base-content/50">
                 {{ t.count }} photo{{ t.count === 1 ? '' : 's' }}
               </span>
               <div class="flex gap-1">
-                <template v-if="t.kind === 'auto'">
-                  <!-- Auto-tags are read-only: they regenerate on every scan. -->
+                <template v-if="t.kind === 'auto' || t.kind === 'system'">
+                  <!-- Auto- and system tags are read-only. -->
                 </template>
                 <template v-else>
                   <button type="button" class="btn btn-xs btn-ghost" @click="startRename(t.name)">Rename</button>

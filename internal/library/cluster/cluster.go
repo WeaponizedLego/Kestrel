@@ -12,6 +12,8 @@
 package cluster
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math/bits"
 	"sort"
 	"sync"
@@ -32,6 +34,13 @@ const (
 	// Similar clusters capture looser visual groups — same subject,
 	// same framing, same scene — at the cost of more false positives.
 	Similar
+
+	// Exact clusters group photos by SHA-256 of their file contents:
+	// byte-identical files. The Hamming threshold doesn't apply — two
+	// files are either the same bytes or they aren't. Used by the
+	// duplicates UI's "exact only" toggle so users can confidently
+	// reclaim provably redundant copies.
+	Exact
 )
 
 // Default thresholds live here as consts rather than knobs because
@@ -46,11 +55,17 @@ const (
 
 // Threshold returns the Hamming-distance cap for the given kind.
 // Exported so callers (handlers, tests) don't duplicate the mapping.
+// Exact returns 0 — its grouping is by content hash, not by distance,
+// but the API still echoes the value so the wire shape is uniform.
 func Threshold(k Kind) int {
-	if k == Similar {
+	switch k {
+	case Similar:
 		return ThresholdSimilar
+	case Exact:
+		return 0
+	default:
+		return ThresholdDuplicate
 	}
-	return ThresholdDuplicate
 }
 
 // Cluster is one group of visually-related photos. Members are the
@@ -67,8 +82,14 @@ type Cluster struct {
 // librarySource is the slice of *library.Library Manager reads from.
 // Declared as an interface so tests can plug in a recording fake and
 // so the cluster package stays a leaf that doesn't import server.
+//
+// IsClusterDismissed is consulted during rebuild to drop clusters the
+// user has marked "not a duplicate". The fingerprint is opaque to the
+// library — compute it via Fingerprint so both producer and consumer
+// agree on the canonical form.
 type librarySource interface {
 	AllPhotos() []*library.Photo
+	IsClusterDismissed(fingerprint string) bool
 }
 
 // Manager owns the cluster cache for one library. Queries are
@@ -160,8 +181,11 @@ func (m *Manager) Progress() Progress {
 	return prog
 }
 
-// rebuildLocked regenerates both kind caches from the current library
-// snapshot. Caller must hold m.mu.
+// rebuildLocked regenerates every kind cache from the current library
+// snapshot. Caller must hold m.mu. Clusters the library has marked
+// dismissed are filtered out of every kind — once a user confirms a
+// group "isn't a duplicate", showing the same group under "Similar" or
+// "Exact" would defeat the purpose.
 func (m *Manager) rebuildLocked() {
 	photos := m.lib.AllPhotos()
 	entries := make([]entry, 0, len(photos))
@@ -175,8 +199,98 @@ func (m *Manager) rebuildLocked() {
 		entries = append(entries, entry{hash: p.PHash, path: p.Path, tagged: len(p.Tags) > 0})
 	}
 
-	m.byKind[Duplicate] = buildClusters(entries, ThresholdDuplicate)
-	m.byKind[Similar] = buildClusters(entries, ThresholdSimilar)
+	m.byKind[Duplicate] = m.filterDismissed(buildClusters(entries, ThresholdDuplicate))
+	m.byKind[Similar] = m.filterDismissed(buildClusters(entries, ThresholdSimilar))
+	m.byKind[Exact] = m.filterDismissed(buildExactClusters(photos))
+}
+
+// filterDismissed drops clusters whose fingerprint the library has
+// marked dismissed. Returns the input slice unchanged when no
+// dismissals match, so the common case allocates nothing extra.
+func (m *Manager) filterDismissed(in []Cluster) []Cluster {
+	if len(in) == 0 {
+		return in
+	}
+	out := in[:0:0]
+	dropped := false
+	for _, c := range in {
+		if m.lib.IsClusterDismissed(Fingerprint(c.Members)) {
+			dropped = true
+			continue
+		}
+		out = append(out, c)
+	}
+	if !dropped {
+		return in
+	}
+	return out
+}
+
+// Fingerprint is the stable identifier for a cluster's membership: a
+// hex SHA-256 over the sorted, newline-joined member paths. Used by
+// the dismissal feature to recognise the same group across rebuilds
+// without depending on the volatile cluster ID (whose root pHash can
+// shift if a member is added or removed).
+func Fingerprint(memberPaths []string) string {
+	if len(memberPaths) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(memberPaths))
+	copy(sorted, memberPaths)
+	sort.Strings(sorted)
+	h := sha256.New()
+	for i, p := range sorted {
+		if i > 0 {
+			h.Write([]byte{'\n'})
+		}
+		h.Write([]byte(p))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// buildExactClusters groups photos by their SHA-256 content hash. Any
+// hash with at least two photos becomes a cluster; photos with an
+// empty Hash (not yet computed) are skipped. Output is sorted the
+// same way as buildClusters' output: size desc, first member asc.
+func buildExactClusters(photos []*library.Photo) []Cluster {
+	if len(photos) == 0 {
+		return nil
+	}
+	groups := make(map[string][]*library.Photo)
+	for _, p := range photos {
+		if p.Hash == "" {
+			continue
+		}
+		groups[p.Hash] = append(groups[p.Hash], p)
+	}
+	clusters := make([]Cluster, 0, len(groups))
+	for hash, members := range groups {
+		if len(members) < 2 {
+			continue
+		}
+		paths := make([]string, 0, len(members))
+		untagged := 0
+		for _, p := range members {
+			paths = append(paths, p.Path)
+			if len(p.Tags) == 0 {
+				untagged++
+			}
+		}
+		sort.Strings(paths)
+		clusters = append(clusters, Cluster{
+			ID:       "exact-" + hash,
+			Members:  paths,
+			Size:     len(paths),
+			Untagged: untagged,
+		})
+	}
+	sort.Slice(clusters, func(i, j int) bool {
+		if clusters[i].Size != clusters[j].Size {
+			return clusters[i].Size > clusters[j].Size
+		}
+		return clusters[i].Members[0] < clusters[j].Members[0]
+	})
+	return clusters
 }
 
 // entry is the per-photo tuple the clustering algorithm consumes.

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/WeaponizedLego/kestrel/internal/library"
+	"github.com/WeaponizedLego/kestrel/internal/library/cluster"
 )
 
 func newTagTestHandler(t *testing.T, photos ...*library.Photo) *http.ServeMux {
@@ -59,11 +60,16 @@ func TestTags_List(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(stats) != 2 {
-		t.Fatalf("stats = %+v, want 2 entries", stats)
+	// Synthetic "untagged" system entry leads the list, then user tags
+	// sorted by name.
+	if len(stats) != 3 {
+		t.Fatalf("stats = %+v, want 3 entries (untagged + cats + cute)", stats)
 	}
-	if stats[0].Name != "cats" || stats[0].Count != 2 {
-		t.Errorf("stats[0] = %+v, want cats:2", stats[0])
+	if stats[0].Name != library.UntaggedTag || stats[0].Kind != library.TagKindSystem {
+		t.Errorf("stats[0] = %+v, want untagged system entry", stats[0])
+	}
+	if stats[1].Name != "cats" || stats[1].Count != 2 {
+		t.Errorf("stats[1] = %+v, want cats:2", stats[1])
 	}
 }
 
@@ -169,19 +175,24 @@ func TestTags_Hidden_HideUnhide(t *testing.T) {
 		t.Fatalf("lib should report wip hidden")
 	}
 
-	// Default list excludes it.
+	// Default list excludes the hidden tag; only the synthetic untagged
+	// entry remains.
 	rec = doJSON(t, mux, http.MethodGet, "/tags/list", nil)
 	var stats []library.TagStat
 	_ = json.Unmarshal(rec.Body.Bytes(), &stats)
-	if len(stats) != 0 {
-		t.Fatalf("default list should be empty when only tag is hidden: %+v", stats)
+	if len(stats) != 1 || stats[0].Kind != library.TagKindSystem {
+		t.Fatalf("default list should be only the system entry when only tag is hidden: %+v", stats)
 	}
 
-	// include_hidden=1 shows it with Hidden=true.
+	// include_hidden=1 shows it with Hidden=true (alongside the system entry).
 	rec = doJSON(t, mux, http.MethodGet, "/tags/list?include_hidden=1", nil)
 	stats = nil
 	_ = json.Unmarshal(rec.Body.Bytes(), &stats)
-	if len(stats) != 1 || stats[0].Name != "wip" || !stats[0].Hidden {
+	if len(stats) != 2 {
+		t.Fatalf("include_hidden list = %+v, want system + wip", stats)
+	}
+	wip := stats[1]
+	if wip.Name != "wip" || !wip.Hidden {
 		t.Fatalf("include_hidden list = %+v", stats)
 	}
 
@@ -214,6 +225,154 @@ func TestTags_Hidden_RejectsLiteralHiddenTag(t *testing.T) {
 		&library.Photo{Path: "/1.jpg", Tags: []string{library.HiddenTag}},
 	)
 	rec := doJSON(t, mux, http.MethodPost, "/tags/hidden", map[string]any{"name": library.HiddenTag, "hidden": true})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestListPhotos_UntaggedToken(t *testing.T) {
+	// Three photos: one with a user tag, one with only an auto-tag, one
+	// with nothing. "untagged" should return the latter two.
+	mux := newTagTestHandler(t,
+		&library.Photo{Path: "/tagged.jpg", Name: "tagged.jpg", Tags: []string{"cats"}},
+		&library.Photo{Path: "/auto-only.jpg", Name: "auto-only.jpg", AutoTags: []string{"camera:nikon"}},
+		&library.Photo{Path: "/bare.jpg", Name: "bare.jpg"},
+	)
+	rec := doJSON(t, mux, http.MethodGet, "/photos?q=untagged", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var photos []library.Photo
+	if err := json.Unmarshal(rec.Body.Bytes(), &photos); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(photos) != 2 {
+		t.Fatalf("got %d photos, want 2 (auto-only + bare): %+v", len(photos), photos)
+	}
+	for _, p := range photos {
+		if p.Path == "/tagged.jpg" {
+			t.Fatalf("tagged photo leaked into untagged result: %+v", p)
+		}
+	}
+}
+
+func TestListPhotos_UntaggedTokenIntersectsName(t *testing.T) {
+	// "untagged" composes with another token under the default match=all.
+	mux := newTagTestHandler(t,
+		&library.Photo{Path: "/IMG_2023_a.jpg", Name: "IMG_2023_a.jpg"},
+		&library.Photo{Path: "/IMG_2024_b.jpg", Name: "IMG_2024_b.jpg"},
+		&library.Photo{Path: "/IMG_2023_c.jpg", Name: "IMG_2023_c.jpg", Tags: []string{"keep"}},
+	)
+	rec := doJSON(t, mux, http.MethodGet, "/photos?q=untagged+2023", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var photos []library.Photo
+	if err := json.Unmarshal(rec.Body.Bytes(), &photos); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(photos) != 1 || photos[0].Path != "/IMG_2023_a.jpg" {
+		t.Fatalf("got %+v, want only IMG_2023_a.jpg", photos)
+	}
+}
+
+func TestTags_Rename_RejectsReservedTarget(t *testing.T) {
+	mux := newTagTestHandler(t,
+		&library.Photo{Path: "/1.jpg", Tags: []string{"cats"}},
+	)
+	rec := doJSON(t, mux, http.MethodPost, "/tags/rename", map[string]string{
+		"from": "cats", "to": library.UntaggedTag,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (reserved target): %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTags_SetTags_StripsReserved(t *testing.T) {
+	// NormalizeTags drops reserved names, so /api/tags can never store
+	// the literal "untagged" on a photo even if a client tries to.
+	mux := newTagTestHandler(t,
+		&library.Photo{Path: "/1.jpg"},
+	)
+	rec := doJSON(t, mux, http.MethodPost, "/tags", map[string]any{
+		"path": "/1.jpg",
+		"tags": []string{"cats", library.UntaggedTag},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct{ Tags []string }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Tags) != 1 || out.Tags[0] != "cats" {
+		t.Fatalf("tags = %+v, want only [cats]", out.Tags)
+	}
+}
+
+func TestClusters_DismissAndUndismiss(t *testing.T) {
+	// Two photos with the same SHA-256 — they form an exact cluster.
+	// Dismissing the cluster should hide it from /api/clusters?kind=exact;
+	// undismissing should bring it back.
+	lib := library.New()
+	lib.AddPhoto(&library.Photo{Path: "/a.jpg", Hash: "h1", PHash: 1})
+	lib.AddPhoto(&library.Photo{Path: "/b.jpg", Hash: "h1", PHash: 1})
+	clusters := cluster.NewManager(lib)
+	mux := http.NewServeMux()
+	NewTaggingHandler(lib, clusters, nil).Register(mux)
+
+	// Cluster initially visible under exact view.
+	rec := doJSON(t, mux, http.MethodGet, "/clusters?kind=exact", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var listed struct {
+		Kind     string            `json:"kind"`
+		Clusters []cluster.Cluster `json:"clusters"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &listed)
+	if listed.Kind != "exact" || len(listed.Clusters) != 1 {
+		t.Fatalf("initial listing = %+v, want one exact cluster", listed)
+	}
+
+	// Dismiss it.
+	rec = doJSON(t, mux, http.MethodPost, "/clusters/dismiss", map[string]any{
+		"members": []string{"/a.jpg", "/b.jpg"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Now hidden under every kind.
+	for _, kind := range []string{"exact", "duplicate", "similar"} {
+		rec = doJSON(t, mux, http.MethodGet, "/clusters?kind="+kind, nil)
+		_ = json.Unmarshal(rec.Body.Bytes(), &listed)
+		if len(listed.Clusters) != 0 {
+			t.Fatalf("after dismiss, kind=%s = %+v, want empty", kind, listed.Clusters)
+		}
+	}
+
+	// Undismiss restores it.
+	rec = doJSON(t, mux, http.MethodPost, "/clusters/undismiss", map[string]any{
+		"members": []string{"/a.jpg", "/b.jpg"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("undismiss status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, mux, http.MethodGet, "/clusters?kind=exact", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &listed)
+	if len(listed.Clusters) != 1 {
+		t.Fatalf("after undismiss, exact = %+v, want one cluster", listed.Clusters)
+	}
+}
+
+func TestClusters_DismissRejectsTooFewMembers(t *testing.T) {
+	lib := library.New()
+	clusters := cluster.NewManager(lib)
+	mux := http.NewServeMux()
+	NewTaggingHandler(lib, clusters, nil).Register(mux)
+
+	rec := doJSON(t, mux, http.MethodPost, "/clusters/dismiss", map[string]any{
+		"members": []string{"/only.jpg"},
+	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}

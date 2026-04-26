@@ -32,6 +32,8 @@ func NewTaggingHandler(lib *library.Library, clusters *cluster.Manager, publishe
 // include "/api".
 func (h *TaggingHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/clusters", h.listClusters)
+	mux.HandleFunc("/clusters/dismiss", h.dismissCluster)
+	mux.HandleFunc("/clusters/undismiss", h.undismissCluster)
 	mux.HandleFunc("/tagging/apply", h.apply)
 	mux.HandleFunc("/tagging/progress", h.progress)
 	mux.HandleFunc("/untagged", h.untaggedByFolder)
@@ -117,17 +119,20 @@ func (h *TaggingHandler) listClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseClusterKind maps the ?kind= query value onto cluster.Kind.
-// Empty or "duplicate" → Duplicate; "similar" → Similar; anything
-// else is a bad request so callers get a clear 4xx rather than a
-// silently-default result.
+// Empty or "duplicate" → Duplicate; "similar" → Similar; "exact" →
+// Exact (byte-identical SHA-256 grouping); anything else is a bad
+// request so callers get a clear 4xx rather than a silently-default
+// result.
 func parseClusterKind(raw string) (cluster.Kind, error) {
 	switch raw {
 	case "", "duplicate":
 		return cluster.Duplicate, nil
 	case "similar":
 		return cluster.Similar, nil
+	case "exact":
+		return cluster.Exact, nil
 	default:
-		return 0, fmt.Errorf("kind must be duplicate or similar, got %q", raw)
+		return 0, fmt.Errorf("kind must be duplicate, similar, or exact, got %q", raw)
 	}
 }
 
@@ -135,10 +140,80 @@ func parseClusterKind(raw string) (cluster.Kind, error) {
 // echo back which kind the response pertains to. Keeping it alongside
 // the parser documents the wire vocabulary as a single table.
 func clusterKindString(k cluster.Kind) string {
-	if k == cluster.Similar {
+	switch k {
+	case cluster.Similar:
 		return "similar"
+	case cluster.Exact:
+		return "exact"
+	default:
+		return "duplicate"
 	}
-	return "duplicate"
+}
+
+// dismissRequest is the JSON body for POST /api/clusters/dismiss and
+// /api/clusters/undismiss. Members is the canonical list of photo
+// paths in the cluster; the server computes the fingerprint server-side
+// so client and server can't drift on the canonicalisation rules.
+type dismissRequest struct {
+	Members []string `json:"members"`
+}
+
+// dismissCluster responds to POST /api/clusters/dismiss. Marks the
+// referenced group as "not a duplicate" so it won't reappear in any
+// of the duplicate/similar/exact views. Invalidates the cluster cache
+// and broadcasts clusters:ready so any open review modal refreshes.
+func (h *TaggingHandler) dismissCluster(w http.ResponseWriter, r *http.Request) {
+	h.toggleDismiss(w, r, true)
+}
+
+// undismissCluster responds to POST /api/clusters/undismiss. Reverses
+// a previous dismissal so the cluster can resurface on the next
+// rebuild. Used by the undo toast.
+func (h *TaggingHandler) undismissCluster(w http.ResponseWriter, r *http.Request) {
+	h.toggleDismiss(w, r, false)
+}
+
+// toggleDismiss is the shared body of dismissCluster and
+// undismissCluster — the only difference is which library method gets
+// called. Kept private so the dismiss/undismiss endpoints stay one
+// HandleFunc each at the registration site.
+func (h *TaggingHandler) toggleDismiss(w http.ResponseWriter, r *http.Request, dismiss bool) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is allowed")
+		return
+	}
+	var req dismissRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if len(req.Members) < 2 {
+		writeError(w, http.StatusBadRequest, "members must contain at least two paths")
+		return
+	}
+	fp := cluster.Fingerprint(req.Members)
+	var err error
+	if dismiss {
+		err = h.lib.DismissCluster(fp)
+	} else {
+		err = h.lib.UndismissCluster(fp)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.clusters.Invalidate()
+	if h.publisher != nil {
+		h.publisher.Publish("clusters:ready", map[string]any{
+			"reason":      "cluster-dismissed",
+			"dismissed":   dismiss,
+			"fingerprint": fp,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fingerprint": fp,
+		"dismissed":   dismiss,
+	})
 }
 
 // applyRequest is the JSON body accepted by POST /api/tagging/apply.

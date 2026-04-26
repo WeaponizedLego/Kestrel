@@ -25,6 +25,22 @@ var ErrDestinationExists = errors.New("destination path already in library")
 // source of truth so tests and handlers can't drift on the spelling.
 const HiddenTag = "hidden"
 
+// UntaggedTag is a virtual search token recognised by the listPhotos
+// handler: when present in ?q= it filters to photos with no user Tags
+// (AutoTags ignored, matching Library.UntaggedByFolder semantics).
+// It is never stored on a photo — NormalizeTags strips it, and the
+// rename/merge endpoints refuse it as a target — so the search
+// pipeline owns the only meaning it has.
+const UntaggedTag = "untagged"
+
+// IsReservedTagName reports whether name (already normalized) is a
+// reserved virtual tag the user cannot create or rename onto. Only
+// UntaggedTag is reserved here; HiddenTag is a real, user-editable tag
+// whose presence on a photo has special suppression behaviour.
+func IsReservedTagName(name string) bool {
+	return name == UntaggedTag
+}
+
 // SortKey selects which pre-built index Sorted reads from. Adding a
 // fourth key means adding a slice, a rebuild branch, and the handler
 // validation — intentionally noisy so we notice the cost.
@@ -59,6 +75,14 @@ type Library struct {
 	// across the whole library, not to individual photos.
 	hiddenTags map[string]struct{}
 
+	// dismissedClusters holds opaque fingerprints of similarity clusters
+	// the user has confirmed "are not duplicates of each other". The
+	// cluster manager skips any group whose fingerprint is in this set,
+	// so a false-positive group disappears from the Duplicates UI for
+	// good. Stored library-level because dismissal is a property of the
+	// (set of) photos, not of any single photo.
+	dismissedClusters map[string]struct{}
+
 	byName []*Photo
 	byDate []*Photo
 	bySize []*Photo
@@ -68,8 +92,9 @@ type Library struct {
 // New returns an empty Library ready for concurrent use.
 func New() *Library {
 	return &Library{
-		photos:     make(map[string]*Photo),
-		hiddenTags: make(map[string]struct{}),
+		photos:            make(map[string]*Photo),
+		hiddenTags:        make(map[string]struct{}),
+		dismissedClusters: make(map[string]struct{}),
 	}
 }
 
@@ -381,8 +406,9 @@ type TagStat struct {
 // TagKind constants for TagStat.Kind. Kept as exported consts so
 // handlers and tests share a single source of truth for the wire values.
 const (
-	TagKindUser = "user"
-	TagKindAuto = "auto"
+	TagKindUser   = "user"
+	TagKindAuto   = "auto"
+	TagKindSystem = "system"
 )
 
 // AllTags returns every distinct user tag (minus any marked hidden)
@@ -411,7 +437,11 @@ func (l *Library) AllTagsFiltered(includeHidden, includeAuto bool) []TagStat {
 	defer l.mu.RUnlock()
 
 	userCounts := make(map[string]int)
+	untaggedCount := 0
 	for _, p := range l.photos {
+		if len(p.Tags) == 0 {
+			untaggedCount++
+		}
 		for _, t := range p.Tags {
 			userCounts[t]++
 		}
@@ -473,6 +503,15 @@ func (l *Library) AllTagsFiltered(includeHidden, includeAuto bool) []TagStat {
 		// user first so it's the editable row.
 		return out[i].Kind < out[j].Kind
 	})
+	// Surface the virtual "untagged" entry at the head of the list so
+	// the Tag Manager can render it as a one-click filter without
+	// tripping any of the user/auto sort/dedup logic above.
+	out = append([]TagStat{{
+		Name:   UntaggedTag,
+		Count:  untaggedCount,
+		Kind:   TagKindSystem,
+		Hidden: false,
+	}}, out...)
 	return out
 }
 
@@ -523,6 +562,76 @@ func (l *Library) HiddenTagSnapshot() []string {
 	return out
 }
 
+// DismissCluster records fingerprint as "the user confirmed this group
+// is not a duplicate". The cluster manager will skip any group with
+// this fingerprint until UndismissCluster is called. Fingerprint is
+// opaque to the library — callers compute it via cluster.Fingerprint
+// so producer and consumer agree on the canonical form.
+func (l *Library) DismissCluster(fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("dismissing cluster: fingerprint is required")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dismissedClusters[fingerprint] = struct{}{}
+	return nil
+}
+
+// UndismissCluster reverses DismissCluster. A no-op when the cluster
+// wasn't dismissed in the first place.
+func (l *Library) UndismissCluster(fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("undismissing cluster: fingerprint is required")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.dismissedClusters, fingerprint)
+	return nil
+}
+
+// IsClusterDismissed reports whether fingerprint is in the dismissed
+// set. Called by the cluster manager during rebuild to filter out
+// previously-dismissed groups.
+func (l *Library) IsClusterDismissed(fingerprint string) bool {
+	if fingerprint == "" {
+		return false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	_, ok := l.dismissedClusters[fingerprint]
+	return ok
+}
+
+// DismissedClusterSnapshot returns a sorted copy of every dismissed
+// fingerprint. Used by persistence to serialise the set without
+// leaking the internal map to callers who might mutate it.
+func (l *Library) DismissedClusterSnapshot() []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]string, 0, len(l.dismissedClusters))
+	for fp := range l.dismissedClusters {
+		out = append(out, fp)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LoadDismissedClusters replaces the dismissed-cluster set with the
+// given fingerprints. Called once at startup from the persistence
+// loader. Empty fingerprints are dropped defensively.
+func (l *Library) LoadDismissedClusters(fingerprints []string) {
+	next := make(map[string]struct{}, len(fingerprints))
+	for _, fp := range fingerprints {
+		if fp == "" {
+			continue
+		}
+		next[fp] = struct{}{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dismissedClusters = next
+}
+
 // LoadHiddenTags replaces the hidden-tag set with names. Inputs are
 // normalized on the way in so a hand-edited persistence file with
 // stray whitespace still loads cleanly. Called once at startup from
@@ -558,6 +667,9 @@ func (l *Library) RenameTag(old, next string) (renamed, absorbed int, err error)
 	if oldNorm == newNorm {
 		return 0, 0, fmt.Errorf("renaming tag: from and to are identical (%q)", oldNorm)
 	}
+	if IsReservedTagName(newNorm) {
+		return 0, 0, fmt.Errorf("renaming tag: %q is a reserved name", newNorm)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, p := range l.photos {
@@ -592,6 +704,9 @@ func (l *Library) MergeTags(source, target string) (renamed, absorbed int, err e
 	}
 	if srcNorm == tgtNorm {
 		return 0, 0, fmt.Errorf("merging tags: source and target are identical (%q)", srcNorm)
+	}
+	if IsReservedTagName(tgtNorm) {
+		return 0, 0, fmt.Errorf("merging tags: %q is a reserved name", tgtNorm)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -705,6 +820,9 @@ func NormalizeTags(raw []string) []string {
 	for _, t := range raw {
 		clean := strings.ToLower(strings.TrimSpace(t))
 		if clean == "" {
+			continue
+		}
+		if IsReservedTagName(clean) {
 			continue
 		}
 		if _, dup := seen[clean]; dup {

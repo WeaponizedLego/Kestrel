@@ -108,6 +108,11 @@ const tagInputRef = ref<InstanceType<typeof TagInput> | null>(null)
 const removePopoverOpen = ref(false)
 const removeBusy = ref(false)
 const removeError = ref<string | null>(null)
+const createPopoverOpen = ref(false)
+const createBusy = ref(false)
+const createError = ref<string | null>(null)
+const createName = ref('')
+const createInputRef = ref<HTMLInputElement | null>(null)
 
 function openMenu(e: MouseEvent, path: string) {
   e.preventDefault()
@@ -117,6 +122,9 @@ function openMenu(e: MouseEvent, path: string) {
   tagPopoverOpen.value = false
   removePopoverOpen.value = false
   removeError.value = null
+  createPopoverOpen.value = false
+  createError.value = null
+  createName.value = ''
 }
 
 function closeMenu() {
@@ -124,6 +132,9 @@ function closeMenu() {
   tagPopoverOpen.value = false
   removePopoverOpen.value = false
   removeError.value = null
+  createPopoverOpen.value = false
+  createError.value = null
+  createName.value = ''
 }
 
 function onEscape(e: KeyboardEvent) {
@@ -153,6 +164,32 @@ async function applyRemove() {
     removeError.value = friendlyError(err)
   } finally {
     removeBusy.value = false
+  }
+}
+
+function startCreateEntry() {
+  createName.value = ''
+  createError.value = null
+  createPopoverOpen.value = true
+  nextTick(() => createInputRef.value?.focus())
+}
+
+async function applyCreate() {
+  if (!menuFolder.value) { closeMenu(); return }
+  const name = createName.value.trim()
+  if (name === '') return
+  createBusy.value = true
+  createError.value = null
+  try {
+    await apiPost<{ created: boolean; path: string }>('/api/folder/create', {
+      parent: menuFolder.value,
+      name,
+    })
+    closeMenu()
+  } catch (err) {
+    createError.value = friendlyError(err)
+  } finally {
+    createBusy.value = false
   }
 }
 
@@ -242,15 +279,54 @@ async function applyTags() {
 
     <Teleport to="body">
       <ul
-        v-if="menuFolder && !tagPopoverOpen && !removePopoverOpen"
+        v-if="menuFolder && !tagPopoverOpen && !removePopoverOpen && !createPopoverOpen"
         class="menu menu-sm bg-base-200 rounded-box fixed z-[1000] w-64 p-2 shadow-xl"
         :style="{ left: menuX + 'px', top: menuY + 'px' }"
         role="menu"
         @click.stop
       >
         <li><button type="button" role="menuitem" @click="startTagEntry">Add tag to all photos in folder…</button></li>
+        <li><button type="button" role="menuitem" @click="startCreateEntry">Create subfolder here…</button></li>
         <li><button type="button" role="menuitem" class="text-error" @click="startRemoveConfirm">Remove folder from index…</button></li>
       </ul>
+
+      <div
+        v-if="menuFolder && createPopoverOpen"
+        class="card bg-base-200 fixed z-[1000] w-80 shadow-2xl"
+        :style="{ left: menuX + 'px', top: menuY + 'px' }"
+        role="dialog"
+        aria-label="Create subfolder"
+        @click.stop
+        @keydown.enter="applyCreate"
+      >
+        <div class="card-body gap-3 p-4">
+          <p class="truncate text-sm" :title="menuFolder">
+            Create subfolder under <span class="font-mono text-xs">{{ menuFolder }}</span>
+          </p>
+          <input
+            ref="createInputRef"
+            v-model="createName"
+            type="text"
+            class="input input-sm input-bordered w-full"
+            placeholder="Folder name"
+            aria-label="New folder name"
+            :disabled="createBusy"
+          />
+          <p class="text-xs text-base-content/60">
+            New folders won't appear in the sidebar until they contain photos. Use Move… to populate them.
+          </p>
+          <div v-if="createError" class="alert alert-error alert-soft text-xs" role="alert">{{ createError }}</div>
+          <div class="card-actions justify-end">
+            <button type="button" class="btn btn-sm btn-ghost" @click="closeMenu" :disabled="createBusy">Cancel</button>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              @click="applyCreate"
+              :disabled="createBusy || createName.trim() === ''"
+            >{{ createBusy ? 'Creating…' : 'Create' }}</button>
+          </div>
+        </div>
+      </div>
 
       <div
         v-if="menuFolder && removePopoverOpen"

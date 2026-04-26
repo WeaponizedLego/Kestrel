@@ -48,6 +48,7 @@ func NewLibraryHandler(lib *library.Library, runner *scanner.Runner, clusters *c
 func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/photos", h.listPhotos)
 	mux.HandleFunc("/photo", h.servePhoto)
+	mux.HandleFunc("/photo/meta", h.photoMeta)
 	mux.HandleFunc("/scan", h.scan)
 	mux.HandleFunc("/scan/cancel", h.cancelScan)
 	mux.HandleFunc("/scan/status", h.scanStatus)
@@ -59,6 +60,7 @@ func (h *LibraryHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/tags", h.setTags)
 	mux.HandleFunc("/folder-tags", h.addFolderTags)
 	mux.HandleFunc("/folder/remove", h.removeFolder)
+	mux.HandleFunc("/folder/create", h.createFolder)
 	mux.HandleFunc("/tags/bulk", h.addBulkTags)
 	mux.HandleFunc("/tags/list", h.listTags)
 	mux.HandleFunc("/tags/rename", h.renameTag)
@@ -557,8 +559,9 @@ func (h *LibraryHandler) clipboardCopy(w http.ResponseWriter, r *http.Request) {
 // browseEntry is one row in a browse listing. Files are omitted;
 // Kestrel only scans folders, so the picker UI never needs them.
 type browseEntry struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	HasChildren bool   `json:"has_children"`
 }
 
 // browseResponse describes one directory's contents. Parent is empty
@@ -629,15 +632,34 @@ func readSubdirs(path string) ([]browseEntry, error) {
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		child := filepath.Join(path, e.Name())
 		out = append(out, browseEntry{
-			Name: e.Name(),
-			Path: filepath.Join(path, e.Name()),
+			Name:        e.Name(),
+			Path:        child,
+			HasChildren: dirHasSubdir(child),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, nil
+}
+
+// dirHasSubdir reports whether path contains at least one
+// non-dot sub-directory. Permission errors and unreadable mounts
+// produce false — the picker UI shows "no chevron", which is the
+// honest signal: we couldn't tell.
+func dirHasSubdir(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // parentPath returns the parent directory, or "" when path is already
@@ -649,6 +671,29 @@ func parentPath(path string) string {
 		return ""
 	}
 	return parent
+}
+
+// photoMeta responds to GET /api/photo/meta?path=… with the JSON
+// representation of a single Photo. Used by surfaces that have a path
+// but need the full struct (e.g. the lightbox preview launched from
+// the duplicate-cluster list, which can't reuse the surrounding
+// PhotoGrid's selection state).
+func (h *LibraryHandler) photoMeta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed")
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	p, err := h.lib.GetPhoto(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "photo not in library")
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 // servePhoto streams the original image bytes for /api/photo?path=…
@@ -739,6 +784,14 @@ func (h *LibraryHandler) listPhotos(w http.ResponseWriter, r *http.Request) {
 	if !containsToken(tokens, library.HiddenTag) {
 		photos = excludeHidden(photos)
 	}
+	// "untagged" is a virtual token: peel it off and apply it as a hard
+	// filter (zero user Tags) before the regular token match runs.
+	// Why: it has to gate even under match=any, since "untagged OR foo"
+	// has no useful reading — the user means "untagged, narrowed by foo".
+	tokens, untaggedOnly := peelToken(tokens, library.UntaggedTag)
+	if untaggedOnly {
+		photos = filterUntagged(photos)
+	}
 	if len(tokens) > 0 {
 		matchAny := r.URL.Query().Get("match") == "any"
 		photos = filterByTokens(photos, tokens, matchAny)
@@ -759,6 +812,36 @@ func excludeHidden(photos []*library.Photo) []*library.Photo {
 		out = append(out, p)
 	}
 	return out
+}
+
+// filterUntagged returns the subset of photos with zero user Tags.
+// AutoTags are ignored — they're auto-derived and almost every photo
+// has at least one, so including them would make the filter useless.
+// Matches Library.UntaggedByFolder and cluster.Progress definitions.
+func filterUntagged(photos []*library.Photo) []*library.Photo {
+	out := make([]*library.Photo, 0, len(photos))
+	for _, p := range photos {
+		if len(p.Tags) == 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// peelToken removes every occurrence of needle from tokens and reports
+// whether at least one was removed. Used to lift virtual tokens out of
+// the regular token-match pipeline.
+func peelToken(tokens []string, needle string) ([]string, bool) {
+	found := false
+	out := tokens[:0:0]
+	for _, t := range tokens {
+		if t == needle {
+			found = true
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, found
 }
 
 // containsToken reports whether tokens includes needle (case-sensitive

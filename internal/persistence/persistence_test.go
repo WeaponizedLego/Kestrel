@@ -30,12 +30,13 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 		{Path: "/p/b.png", Hash: "cafef00d", Name: "b.png", SizeBytes: 2048},
 	}
 	wantHidden := []string{"secret", "wip"}
+	wantDismissed := []string{"fp-aaa", "fp-bbb"}
 
-	if err := Save(path, want, wantHidden); err != nil {
+	if err := Save(path, want, wantHidden, wantDismissed); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	got, hidden, err := Load(path)
+	got, hidden, dismissed, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -50,16 +51,19 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(hidden, wantHidden) {
 		t.Errorf("hidden tags: got %v, want %v", hidden, wantHidden)
 	}
+	if !reflect.DeepEqual(dismissed, wantDismissed) {
+		t.Errorf("dismissed clusters: got %v, want %v", dismissed, wantDismissed)
+	}
 }
 
 func TestLoad_MissingFileReturnsNil(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.gob")
-	got, hidden, err := Load(path)
+	got, hidden, dismissed, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load(missing): unexpected error %v", err)
 	}
-	if got != nil || hidden != nil {
-		t.Fatalf("Load(missing): got %v / %v, want nil / nil", got, hidden)
+	if got != nil || hidden != nil || dismissed != nil {
+		t.Fatalf("Load(missing): got %v / %v / %v, want nil / nil / nil", got, hidden, dismissed)
 	}
 }
 
@@ -76,7 +80,7 @@ func TestLoad_BadMagic(t *testing.T) {
 	}
 	f.Close()
 
-	if _, _, err := Load(path); !errors.Is(err, ErrBadMagic) {
+	if _, _, _, err := Load(path); !errors.Is(err, ErrBadMagic) {
 		t.Fatalf("expected ErrBadMagic, got %v", err)
 	}
 }
@@ -92,7 +96,7 @@ func TestLoad_UnknownVersion(t *testing.T) {
 	}
 	f.Close()
 
-	if _, _, err := Load(path); !errors.Is(err, ErrUnknownVersion) {
+	if _, _, _, err := Load(path); !errors.Is(err, ErrUnknownVersion) {
 		t.Fatalf("expected ErrUnknownVersion, got %v", err)
 	}
 }
@@ -105,13 +109,13 @@ func TestSave_AtomicReplace(t *testing.T) {
 		{Path: "/p/y.jpg", Name: "y.jpg", SizeBytes: 10},
 	}
 
-	if err := Save(path, first, nil); err != nil {
+	if err := Save(path, first, nil, nil); err != nil {
 		t.Fatalf("Save first: %v", err)
 	}
-	if err := Save(path, second, nil); err != nil {
+	if err := Save(path, second, nil, nil); err != nil {
 		t.Fatalf("Save second: %v", err)
 	}
-	got, _, err := Load(path)
+	got, _, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -143,7 +147,7 @@ func TestLoad_V2IsForwardCompat(t *testing.T) {
 	}
 	f.Close()
 
-	got, hidden, err := Load(path)
+	got, hidden, dismissed, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load v2: %v", err)
 	}
@@ -152,5 +156,45 @@ func TestLoad_V2IsForwardCompat(t *testing.T) {
 	}
 	if len(hidden) != 0 {
 		t.Fatalf("hidden: got %v, want empty", hidden)
+	}
+	if len(dismissed) != 0 {
+		t.Fatalf("dismissed: got %v, want empty", dismissed)
+	}
+}
+
+// TestLoad_V3IsForwardCompat verifies a v3 file (header + photos +
+// hidden tags, no dismissed-cluster slice) still decodes cleanly under
+// the v4 reader — the dismissed set comes back empty.
+func TestLoad_V3IsForwardCompat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library_meta.gob")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := gob.NewEncoder(f)
+	if err := enc.Encode(header{Magic: magic, Version: 3}); err != nil {
+		t.Fatal(err)
+	}
+	photos := []*library.Photo{{Path: "/p/a.jpg", Name: "a.jpg"}}
+	if err := enc.Encode(photos); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode([]string{"wip"}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	got, hidden, dismissed, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load v3: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("photos: got %d, want 1", len(got))
+	}
+	if len(hidden) != 1 || hidden[0] != "wip" {
+		t.Fatalf("hidden: got %v, want [wip]", hidden)
+	}
+	if len(dismissed) != 0 {
+		t.Fatalf("dismissed: got %v, want empty", dismissed)
 	}
 }
