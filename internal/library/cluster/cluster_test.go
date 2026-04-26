@@ -8,10 +8,12 @@ import (
 
 type stubLib struct {
 	photos    []*library.Photo
+	audios    []*library.Audio
 	dismissed map[string]struct{}
 }
 
 func (s stubLib) AllPhotos() []*library.Photo { return s.photos }
+func (s stubLib) AllAudios() []*library.Audio { return s.audios }
 
 func (s stubLib) IsClusterDismissed(fp string) bool {
 	_, ok := s.dismissed[fp]

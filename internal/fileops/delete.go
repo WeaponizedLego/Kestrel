@@ -35,17 +35,24 @@ func (m *Manager) Delete(paths []string, opts DeleteOptions) ([]Result, error) {
 	results := make([]Result, 0, len(paths))
 	undoItems := make([]OperationItem, 0, len(paths))
 
-	for _, path := range paths {
+	kind := "delete"
+	if opts.Permanent {
+		kind = "permanent-delete"
+	}
+	total := len(paths)
+	m.publishStarted(kind, total)
+	for i, path := range paths {
 		if opts.Permanent {
 			res := m.deleteOnePermanent(path)
 			results = append(results, res)
-			continue
+		} else {
+			res, item, ok := m.deleteOneToTrash(path)
+			results = append(results, res)
+			if ok {
+				undoItems = append(undoItems, item)
+			}
 		}
-		res, item, ok := m.deleteOneToTrash(path)
-		results = append(results, res)
-		if ok {
-			undoItems = append(undoItems, item)
-		}
+		m.publishProgress(kind, i+1, total)
 	}
 
 	if err := m.cfg.Persist(); err != nil {
@@ -66,10 +73,6 @@ func (m *Manager) Delete(paths []string, opts DeleteOptions) ([]Result, error) {
 	}
 
 	successes, failures := countResults(results)
-	kind := "delete"
-	if opts.Permanent {
-		kind = "permanent-delete"
-	}
 	m.publish("fileops:done", map[string]any{
 		"kind":    kind,
 		"deleted": successes,

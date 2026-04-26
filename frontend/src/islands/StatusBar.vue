@@ -10,6 +10,9 @@ interface ScanStarted { id: string; root: string; intensity?: ScanIntensity }
 interface RescanProgress { root_index: number; root_total: number; current_root: string; phase: 'scan' | 'prune' }
 type ScanIntensity = 'normal' | 'low'
 
+interface FileopsStarted { kind: string; total: number; started_at: number }
+interface FileopsProgress { kind: string; processed: number; total: number }
+
 const baseMessage = ref('Idle')
 const photoCount = ref<number | null>(null)
 const scanProcessed = ref(0)
@@ -38,6 +41,61 @@ const message = computed(() => {
   if (resyncNotice.value) return resyncNotice.value
   return baseMessage.value
 })
+
+const fileopsKind = ref<string | null>(null)
+const fileopsProcessed = ref(0)
+const fileopsTotal = ref(0)
+const fileopsStartedAt = ref(0)
+const fileopsElapsedSec = ref(0)
+let fileopsTicker: number | null = null
+
+const fileopsVerb = computed(() => {
+  switch (fileopsKind.value) {
+    case 'move': return 'Moving'
+    case 'delete': return 'Moving to trash'
+    case 'permanent-delete': return 'Deleting'
+    case 'undo-move':
+    case 'undo-delete':
+    case 'undo': return 'Undoing'
+    default: return 'Working'
+  }
+})
+
+const fileopsVisible = computed(() => {
+  if (fileopsKind.value === null) return false
+  // Suppress for instant ops: a single same-FS rename completes in
+  // milliseconds and a flashing bar would just be noise.
+  if (fileopsTotal.value <= 5 && fileopsElapsedSec.value < 1) return false
+  return true
+})
+
+const fileopsPct = computed(() => {
+  if (fileopsTotal.value <= 0) return -1
+  return Math.min(100, Math.round((fileopsProcessed.value / fileopsTotal.value) * 100))
+})
+
+const fileopsElapsedLabel = computed(() => {
+  const s = Math.max(0, fileopsElapsedSec.value)
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${r < 10 ? '0' : ''}${r}`
+})
+
+function startFileopsTicker() {
+  if (fileopsTicker !== null) return
+  fileopsTicker = window.setInterval(() => {
+    if (fileopsStartedAt.value > 0) {
+      fileopsElapsedSec.value = Math.floor((Date.now() - fileopsStartedAt.value) / 1000)
+    }
+  }, 1000)
+}
+
+function stopFileopsTicker() {
+  if (fileopsTicker !== null) {
+    window.clearInterval(fileopsTicker)
+    fileopsTicker = null
+  }
+}
 
 const scanRunning = ref(false)
 const scanIntensity = ref<ScanIntensity>('normal')
@@ -72,7 +130,16 @@ function pulseFlashOk() {
 }
 
 watch(resyncing, (now, prev) => {
-  if (prev && !now && !isErrorNotice(resyncNotice.value)) pulseFlashOk()
+  if (prev && !now) {
+    // Whatever cleared resyncing — rescan:done, an HTTP error, a
+    // 409 short-circuit — is the authoritative end of this session.
+    // Drop any rescan progress refs so a late progress frame can't
+    // leave the bar stuck on "removing missing files".
+    rescanRootIndex.value = 0
+    rescanRootTotal.value = 0
+    rescanPhase.value = null
+    if (!isErrorNotice(resyncNotice.value)) pulseFlashOk()
+  }
 })
 
 function isErrorNotice(text: string | null): boolean {
@@ -125,6 +192,11 @@ onMounted(() => {
     }
   }))
   unsubs.push(onEvent('rescan:progress', (payload) => {
+    // Drop late-arriving progress from a rescan whose UI session has
+    // already ended (error path cleared resyncing, or rescan:done
+    // already landed). Without this guard a straggler frame can
+    // re-paint a "Syncing folder…" line the user has no way to clear.
+    if (!resyncing.value) return
     const p = payload as RescanProgress
     rescanRootIndex.value = p.root_index
     rescanRootTotal.value = p.root_total
@@ -139,6 +211,29 @@ onMounted(() => {
     rescanRootTotal.value = 0
     rescanPhase.value = null
   }))
+  unsubs.push(onEvent('fileops:started', (payload) => {
+    const p = payload as FileopsStarted
+    fileopsKind.value = p.kind
+    fileopsTotal.value = p.total
+    fileopsProcessed.value = 0
+    fileopsStartedAt.value = p.started_at || Date.now()
+    fileopsElapsedSec.value = 0
+    startFileopsTicker()
+  }))
+  unsubs.push(onEvent('fileops:progress', (payload) => {
+    const p = payload as FileopsProgress
+    fileopsKind.value = p.kind
+    fileopsProcessed.value = p.processed
+    fileopsTotal.value = p.total
+  }))
+  unsubs.push(onEvent('fileops:done', () => {
+    stopFileopsTicker()
+    fileopsKind.value = null
+    fileopsProcessed.value = 0
+    fileopsTotal.value = 0
+    fileopsStartedAt.value = 0
+    fileopsElapsedSec.value = 0
+  }))
   unsubs.push(onEvent('library:updated', (payload) => {
     const { count } = (payload as { count: number }) ?? { count: 0 }
     photoCount.value = count
@@ -146,7 +241,10 @@ onMounted(() => {
   }))
 })
 
-onBeforeUnmount(() => { for (const u of unsubs) u() })
+onBeforeUnmount(() => {
+  stopFileopsTicker()
+  for (const u of unsubs) u()
+})
 </script>
 
 <template>
@@ -161,7 +259,23 @@ onBeforeUnmount(() => { for (const u of unsubs) u() })
       · safe to close or keep using Kestrel
     </span>
 
-    <div v-if="scanPct !== null" class="flex items-center gap-2">
+    <div v-if="fileopsVisible" class="flex items-center gap-2">
+      <span class="font-sans text-base-content">
+        {{ fileopsVerb }}
+        <span class="tabular-nums">{{ fileopsProcessed.toLocaleString() }}/{{ fileopsTotal.toLocaleString() }}</span>
+        — <span class="tabular-nums">{{ fileopsElapsedLabel }}</span>
+      </span>
+      <progress
+        class="progress progress-primary w-32 h-1"
+        :value="fileopsPct >= 0 ? fileopsPct : undefined"
+        max="100"
+      />
+      <span class="text-primary tabular-nums w-8 text-right">
+        {{ fileopsPct >= 0 ? `${fileopsPct}%` : '…' }}
+      </span>
+    </div>
+
+    <div v-else-if="scanPct !== null" class="flex items-center gap-2">
       <progress
         v-if="scanPct >= 0"
         class="progress progress-primary w-32 h-1"

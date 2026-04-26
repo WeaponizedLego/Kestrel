@@ -209,7 +209,7 @@ func run(devMode bool, bind string, logPath string) error {
 			hub.Publish("clusters:ready", map[string]any{
 				"reason": "scan-complete",
 			})
-			if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot()); err != nil {
+			if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot(), lib.AllAudios()); err != nil {
 				slog.Error("post-scan save failed", "path", metaPath, "err", err)
 			}
 		},
@@ -283,7 +283,7 @@ func run(devMode bool, bind string, logPath string) error {
 		Journal: fileJournal,
 		Trash:   trashBin,
 		Persist: func() error {
-			return persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot())
+			return persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot(), lib.AllAudios())
 		},
 		ScanActive: func() bool {
 			// File ops must not race a user-triggered scan writing
@@ -401,7 +401,7 @@ func run(devMode bool, bind string, logPath string) error {
 	// goroutine could still be mutating the library while persistence
 	// takes its snapshot.
 	runner.Shutdown()
-	if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot()); err != nil {
+	if err := persistence.Save(metaPath, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot(), lib.AllAudios()); err != nil {
 		slog.Error("final save failed", "path", metaPath, "err", err)
 	}
 
@@ -459,7 +459,7 @@ func openThumbsPack(path string) (*thumbnail.Pack, error) {
 // PathHasher closure that translates photo paths into pack hashes.
 func buildProvider(lib *library.Library, pack *thumbnail.Pack, hub *server.Hub) *thumbnail.TieredProvider {
 	budget := platform.ThumbnailBudget()
-	photoCount := int64(lib.Len())
+	photoCount := int64(lib.Len() + lib.LenAudio())
 	estimated := photoCount * avgThumbnailBytes
 
 	mode := thumbnail.ModeTiered
@@ -484,9 +484,12 @@ func buildProvider(lib *library.Library, pack *thumbnail.Pack, hub *server.Hub) 
 	})
 
 	if mode == thumbnail.ModeEager {
-		paths := make([]string, 0, photoCount)
+		paths := make([]string, 0, photoCount+int64(lib.LenAudio()))
 		for _, p := range lib.AllPhotos() {
 			paths = append(paths, p.Path)
+		}
+		for _, a := range lib.AllAudios() {
+			paths = append(paths, a.Path)
 		}
 		if err := provider.WarmEager(paths); err != nil {
 			slog.Warn("warming eager cache", "err", err)
@@ -501,11 +504,13 @@ func buildProvider(lib *library.Library, pack *thumbnail.Pack, hub *server.Hub) 
 func hasherFor(lib *library.Library) thumbnail.PathHasher {
 	return func(path string) ([32]byte, bool) {
 		var zero [32]byte
-		photo, err := lib.GetPhoto(path)
-		if err != nil {
-			return zero, false
+		if photo, err := lib.GetPhoto(path); err == nil {
+			return thumbnail.HashFromHex(photo.Hash)
 		}
-		return thumbnail.HashFromHex(photo.Hash)
+		if audio, err := lib.GetAudio(path); err == nil {
+			return thumbnail.HashFromHex(audio.Hash)
+		}
+		return zero, false
 	}
 }
 
@@ -513,15 +518,18 @@ func hasherFor(lib *library.Library) thumbnail.PathHasher {
 // A missing file is intentionally not an error: first-run binaries
 // start with an empty library and build one via the scan API.
 func loadLibrary(lib *library.Library, path string) error {
-	photos, hidden, dismissed, err := persistence.Load(path)
+	photos, hidden, dismissed, audios, err := persistence.Load(path)
 	if err != nil {
 		return err
 	}
-	if len(photos) == 0 && len(hidden) == 0 && len(dismissed) == 0 {
+	if len(photos) == 0 && len(hidden) == 0 && len(dismissed) == 0 && len(audios) == 0 {
 		return nil
 	}
 	if len(photos) > 0 {
 		lib.ReplaceAll(photos)
+	}
+	if len(audios) > 0 {
+		lib.ReplaceAllAudio(audios)
 	}
 	if len(hidden) > 0 {
 		lib.LoadHiddenTags(hidden)
@@ -531,6 +539,7 @@ func loadLibrary(lib *library.Library, path string) error {
 	}
 	slog.Info("library loaded",
 		"count", len(photos),
+		"audios", len(audios),
 		"hidden_tags", len(hidden),
 		"dismissed_clusters", len(dismissed),
 		"path", path,
@@ -549,7 +558,7 @@ func autoSaveLoop(ctx context.Context, lib *library.Library, path string, interv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := persistence.Save(path, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot()); err != nil {
+			if err := persistence.Save(path, lib.AllPhotos(), lib.HiddenTagSnapshot(), lib.DismissedClusterSnapshot(), lib.AllAudios()); err != nil {
 				slog.Error("auto-save failed", "path", path, "err", err)
 			}
 		}

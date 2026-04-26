@@ -90,14 +90,24 @@ var videoExts = map[string]struct{}{
 	".mp4": {}, ".mov": {}, ".m4v": {}, ".avi": {}, ".mkv": {}, ".webm": {},
 }
 
-// kindTag classifies the file as photo vs. video by extension. Unknown
-// extensions default to photo — the scanner only accepts known image
-// formats today, so an unknown here means a future caller is passing
-// something we haven't classified yet.
+// audioExts mirrors the scanner's audio extension list. Kept here so
+// kindTag can classify audio without importing scanner; the two lists
+// agree by convention.
+var audioExts = map[string]struct{}{
+	".mp3": {}, ".m4a": {}, ".aac": {}, ".flac": {}, ".wav": {}, ".ogg": {}, ".opus": {},
+}
+
+// kindTag classifies the file as photo, video, or audio by extension.
+// Unknown extensions default to photo — the scanner only accepts
+// known formats today, so an unknown here means a future caller is
+// passing something we haven't classified yet.
 func kindTag(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if _, ok := videoExts[ext]; ok {
 		return "kind:video"
+	}
+	if _, ok := audioExts[ext]; ok {
+		return "kind:audio"
 	}
 	return "kind:photo"
 }

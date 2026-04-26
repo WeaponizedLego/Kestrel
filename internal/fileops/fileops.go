@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/WeaponizedLego/kestrel/internal/fileops/journal"
 	"github.com/WeaponizedLego/kestrel/internal/fileops/trash"
@@ -191,6 +192,29 @@ func (m *Manager) publish(kind string, payload any) {
 	if m.cfg.Publisher != nil {
 		m.cfg.Publisher.Publish(kind, payload)
 	}
+}
+
+// publishStarted announces the beginning of a batched file op so the
+// UI can show a live progress row. opKind names the user-visible
+// action ("move", "delete", "permanent-delete", "undo-move",
+// "undo-delete"); total is the batch size.
+func (m *Manager) publishStarted(opKind string, total int) {
+	m.publish("fileops:started", map[string]any{
+		"kind":       opKind,
+		"total":      total,
+		"started_at": time.Now().UnixMilli(),
+	})
+}
+
+// publishProgress reports per-item advancement during a batched file
+// op. processed counts items finished so far (success or failure);
+// total is the batch size announced by publishStarted.
+func (m *Manager) publishProgress(opKind string, processed, total int) {
+	m.publish("fileops:progress", map[string]any{
+		"kind":      opKind,
+		"processed": processed,
+		"total":     total,
+	})
 }
 
 // ensureScanIdle returns ErrScanInProgress when the scanner is

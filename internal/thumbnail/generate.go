@@ -86,6 +86,10 @@ func NewMediaThumbnailer(video VideoProvider) func(path string) ([]byte, uint64,
 		video = noVideo{}
 	}
 	return func(path string) ([]byte, uint64, error) {
+		if IsAudioPath(path) {
+			data, err := GenerateAudioThumbnail(path)
+			return data, 0, err
+		}
 		if !IsVideoPath(path) {
 			return GenerateWithHash(path)
 		}

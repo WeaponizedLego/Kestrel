@@ -29,7 +29,10 @@ func (m *Manager) Undo() (UndoSummary, error) {
 	}
 
 	results := make([]Result, 0, len(op.Items))
-	for _, item := range op.Items {
+	kind := undoKindLabel(op.Kind)
+	total := len(op.Items)
+	m.publishStarted(kind, total)
+	for i, item := range op.Items {
 		switch op.Kind {
 		case journal.KindMove:
 			results = append(results, m.undoMoveItem(item))
@@ -41,6 +44,7 @@ func (m *Manager) Undo() (UndoSummary, error) {
 				Error: fmt.Sprintf("undo not supported for kind %q", op.Kind),
 			})
 		}
+		m.publishProgress(kind, i+1, total)
 	}
 
 	if err := m.cfg.Persist(); err != nil {
@@ -164,6 +168,21 @@ func (m *Manager) undoDeleteItem(item OperationItem) Result {
 	})
 	res.Success = true
 	return res
+}
+
+// undoKindLabel maps a journal Kind to the user-visible string used
+// in fileops:started / fileops:progress events. Unknown kinds fall
+// back to a generic "undo" so the StatusBar still has something to
+// render.
+func undoKindLabel(k journal.Kind) string {
+	switch k {
+	case journal.KindMove:
+		return "undo-move"
+	case journal.KindDelete:
+		return "undo-delete"
+	default:
+		return "undo"
+	}
 }
 
 // describeItem returns a human-readable label for an OperationItem,

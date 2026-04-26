@@ -89,6 +89,7 @@ type Cluster struct {
 // agree on the canonical form.
 type librarySource interface {
 	AllPhotos() []*library.Photo
+	AllAudios() []*library.Audio
 	IsClusterDismissed(fingerprint string) bool
 }
 
@@ -173,6 +174,14 @@ func (m *Manager) Progress() Progress {
 			prog.Untagged++
 		}
 	}
+	for _, a := range m.lib.AllAudios() {
+		prog.Total++
+		if len(a.Tags) > 0 {
+			prog.Tagged++
+		} else {
+			prog.Untagged++
+		}
+	}
 	for _, c := range m.byKind[Duplicate] {
 		if c.Untagged > prog.LargestUntaggedSize {
 			prog.LargestUntaggedSize = c.Untagged
@@ -188,7 +197,9 @@ func (m *Manager) Progress() Progress {
 // "Exact" would defeat the purpose.
 func (m *Manager) rebuildLocked() {
 	photos := m.lib.AllPhotos()
-	entries := make([]entry, 0, len(photos))
+	audios := m.lib.AllAudios()
+
+	photoEntries := make([]entry, 0, len(photos))
 	for _, p := range photos {
 		if p.PHash == 0 {
 			// No hash → can't cluster. Skip rather than lumping every
@@ -196,12 +207,31 @@ func (m *Manager) rebuildLocked() {
 			// "no hash yet" which is not visual similarity.
 			continue
 		}
-		entries = append(entries, entry{hash: p.PHash, path: p.Path, tagged: len(p.Tags) > 0})
+		photoEntries = append(photoEntries, entry{hash: p.PHash, path: p.Path, tagged: len(p.Tags) > 0})
+	}
+	// Audio clusters live in a separate union-find pass so an image
+	// dHash and an audio Chromaprint fold that happen to be Hamming-close
+	// can never merge into the same cluster — the two algorithms produce
+	// 64-bit values from different domains.
+	audioEntries := make([]entry, 0, len(audios))
+	for _, a := range audios {
+		if a.PHash == 0 {
+			continue
+		}
+		audioEntries = append(audioEntries, entry{hash: a.PHash, path: a.Path, tagged: len(a.Tags) > 0})
 	}
 
-	m.byKind[Duplicate] = m.filterDismissed(buildClusters(entries, ThresholdDuplicate))
-	m.byKind[Similar] = m.filterDismissed(buildClusters(entries, ThresholdSimilar))
-	m.byKind[Exact] = m.filterDismissed(buildExactClusters(photos))
+	m.byKind[Duplicate] = m.filterDismissed(append(
+		buildClusters(photoEntries, ThresholdDuplicate),
+		buildClusters(audioEntries, ThresholdDuplicate)...,
+	))
+	m.byKind[Similar] = m.filterDismissed(append(
+		buildClusters(photoEntries, ThresholdSimilar),
+		buildClusters(audioEntries, ThresholdSimilar)...,
+	))
+	// Exact clusters group by SHA-256 of file contents; photo and audio
+	// bytes can never collide, so a single pass over both kinds is safe.
+	m.byKind[Exact] = m.filterDismissed(buildExactClustersAll(photos, audios))
 }
 
 // filterDismissed drops clusters whose fingerprint the library has
@@ -248,20 +278,42 @@ func Fingerprint(memberPaths []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// buildExactClusters groups photos by their SHA-256 content hash. Any
-// hash with at least two photos becomes a cluster; photos with an
-// empty Hash (not yet computed) are skipped. Output is sorted the
-// same way as buildClusters' output: size desc, first member asc.
-func buildExactClusters(photos []*library.Photo) []Cluster {
-	if len(photos) == 0 {
+// exactItem is the small tuple buildExactClustersAll consumes so it
+// can group photos and audios uniformly without leaking either type
+// into the cluster output.
+type exactItem struct {
+	hash    string
+	path    string
+	tagged  bool
+}
+
+// buildExactClustersAll groups both photos and audios by their
+// SHA-256 content hash. Any hash with at least two members becomes a
+// cluster; items with an empty Hash (not yet computed) are skipped.
+// Photo and audio bytes never collide on SHA-256, so the same hash
+// can't span kinds — a single pass over both slices is safe. Output
+// is sorted the same way as buildClusters' output: size desc, first
+// member asc.
+func buildExactClustersAll(photos []*library.Photo, audios []*library.Audio) []Cluster {
+	if len(photos) == 0 && len(audios) == 0 {
 		return nil
 	}
-	groups := make(map[string][]*library.Photo)
+	items := make([]exactItem, 0, len(photos)+len(audios))
 	for _, p := range photos {
 		if p.Hash == "" {
 			continue
 		}
-		groups[p.Hash] = append(groups[p.Hash], p)
+		items = append(items, exactItem{hash: p.Hash, path: p.Path, tagged: len(p.Tags) > 0})
+	}
+	for _, a := range audios {
+		if a.Hash == "" {
+			continue
+		}
+		items = append(items, exactItem{hash: a.Hash, path: a.Path, tagged: len(a.Tags) > 0})
+	}
+	groups := make(map[string][]exactItem)
+	for _, it := range items {
+		groups[it.hash] = append(groups[it.hash], it)
 	}
 	clusters := make([]Cluster, 0, len(groups))
 	for hash, members := range groups {
@@ -270,9 +322,9 @@ func buildExactClusters(photos []*library.Photo) []Cluster {
 		}
 		paths := make([]string, 0, len(members))
 		untagged := 0
-		for _, p := range members {
-			paths = append(paths, p.Path)
-			if len(p.Tags) == 0 {
+		for _, m := range members {
+			paths = append(paths, m.path)
+			if !m.tagged {
 				untagged++
 			}
 		}

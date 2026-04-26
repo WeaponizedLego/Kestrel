@@ -5,7 +5,7 @@ import { useCapabilities } from '../transport/capabilities'
 import { copyImageToClipboard } from '../transport/clipboard'
 import { requestDelete, requestMove } from '../transport/fileops'
 import type { Photo } from '../types'
-import { isVideo } from '../util/media'
+import { isAudio, isVideo } from '../util/media'
 
 const TagInput = defineAsyncComponent(() => import('../components/TagInput.vue'))
 const LightboxModal = defineAsyncComponent(() => import('../components/LightboxModal.vue'))
@@ -19,6 +19,7 @@ const emit = defineEmits<{
 
 const src = computed(() => (props.photo ? photoSrc(props.photo.Path) : ''))
 const video = computed(() => (props.photo ? isVideo(props.photo) : false))
+const audio = computed(() => (props.photo ? isAudio(props.photo) : false))
 const capabilities = useCapabilities()
 
 const dims = computed(() =>
@@ -160,6 +161,13 @@ async function commitTags(next: string[]) {
           preload="metadata"
           class="max-h-full max-w-full rounded"
         />
+        <audio
+          v-else-if="audio"
+          :src="src"
+          controls
+          preload="metadata"
+          class="w-full max-w-full"
+        />
         <img
           v-else
           :src="src"
@@ -190,7 +198,7 @@ async function commitTags(next: string[]) {
       ffmpeg not installed — thumbnails for videos are placeholders. Install ffmpeg and rescan to generate real previews.
     </div>
 
-    <div v-if="photo && !video" class="flex flex-col gap-2 px-4 pt-3 pb-2">
+    <div v-if="photo && !video && !audio" class="flex flex-col gap-2 px-4 pt-3 pb-2">
       <button
         type="button"
         :class="[

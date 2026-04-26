@@ -8,7 +8,7 @@
 // refs are effectively singletons.
 
 import { ref } from 'vue'
-import { apiPost, friendlyError } from './api'
+import { ApiError, apiPost, friendlyError } from './api'
 import { onEvent } from './events'
 import { selectedFolder } from './selection'
 
@@ -84,6 +84,14 @@ export async function runResync(): Promise<void> {
       announce('No watched folders to re-scan.')
     }
   } catch (err) {
+    // 409 Conflict means an in-flight scan/rescan is still running.
+    // Don't clear resyncing — its trailing rescan:done will close the
+    // UI cleanly. Flipping resyncing here would let stale progress
+    // events from the in-flight run paint a stuck status bar.
+    if (err instanceof ApiError && err.status === 409) {
+      announce('Re-scan already running.')
+      return
+    }
     resyncing.value = false
     announce(friendlyError(err))
   }

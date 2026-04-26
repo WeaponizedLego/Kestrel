@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -483,12 +484,15 @@ func (h *LibraryHandler) setTags(w http.ResponseWriter, r *http.Request) {
 	}
 	// Return the canonical tag set so the frontend can sync to the
 	// normalized form (lowercase, deduped) without a second fetch.
-	p, err := h.lib.GetPhoto(req.Path)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if p, err := h.lib.GetPhoto(req.Path); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"tags": p.Tags})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tags": p.Tags})
+	if a, err := h.lib.GetAudio(req.Path); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"tags": a.Tags})
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "tags persisted but path vanished")
 }
 
 // revealRequest is the JSON body accepted by POST /api/reveal.
@@ -514,7 +518,7 @@ func (h *LibraryHandler) reveal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	if _, err := h.lib.GetPhoto(req.Path); err != nil {
+	if !h.pathInLibrary(req.Path) {
 		writeError(w, http.StatusNotFound, "photo not in library")
 		return
 	}
@@ -688,12 +692,16 @@ func (h *LibraryHandler) photoMeta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	p, err := h.lib.GetPhoto(path)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "photo not in library")
+	if p, err := h.lib.GetPhoto(path); err == nil {
+		writeJSON(w, http.StatusOK, p)
 		return
 	}
-	writeJSON(w, http.StatusOK, p)
+	if a, err := h.lib.GetAudio(path); err == nil {
+		projected := library.AudioAsPhoto(a)
+		writeJSON(w, http.StatusOK, &projected)
+		return
+	}
+	writeError(w, http.StatusNotFound, "photo not in library")
 }
 
 // servePhoto streams the original image bytes for /api/photo?path=…
@@ -715,7 +723,7 @@ func (h *LibraryHandler) servePhoto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	if _, err := h.lib.GetPhoto(path); err != nil {
+	if !h.pathInLibrary(path) {
 		writeError(w, http.StatusNotFound, "photo not in library")
 		return
 	}
@@ -726,11 +734,26 @@ func (h *LibraryHandler) servePhoto(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
+// pathInLibrary reports whether path is registered as either a photo
+// or an audio entry. Used by every "stream a file by path" or "act on
+// the file at path" endpoint as the traversal gate, since by the time
+// audio entered the wire shape every path-keyed handler must accept
+// both kinds.
+func (h *LibraryHandler) pathInLibrary(path string) bool {
+	if _, err := h.lib.GetPhoto(path); err == nil {
+		return true
+	}
+	if _, err := h.lib.GetAudio(path); err == nil {
+		return true
+	}
+	return false
+}
+
 // mediaContentType returns the MIME type Kestrel wants attached to a
-// served file, or "" to defer to net/http's own sniffing. Video types
-// are pinned explicitly because http.ServeFile's sniffer can produce
-// "application/octet-stream" for less common containers (e.g. .mkv),
-// which the browser then refuses to play.
+// served file, or "" to defer to net/http's own sniffing. Video and
+// audio types are pinned explicitly because http.ServeFile's sniffer
+// can produce "application/octet-stream" for less common containers
+// (e.g. .mkv, .flac, .opus), which the browser then refuses to play.
 func mediaContentType(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".mp4", ".m4v":
@@ -743,6 +766,18 @@ func mediaContentType(path string) string {
 		return "video/x-matroska"
 	case ".avi":
 		return "video/x-msvideo"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".m4a", ".aac":
+		return "audio/mp4"
+	case ".flac":
+		return "audio/flac"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg":
+		return "audio/ogg"
+	case ".opus":
+		return "audio/ogg; codecs=opus"
 	}
 	return ""
 }
@@ -772,7 +807,7 @@ func (h *LibraryHandler) listPhotos(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	photos := h.lib.Sorted(key, desc)
+	photos := mergeSortedMedia(h.lib.Sorted(key, desc), h.lib.SortedAudio(key, desc), key, desc)
 	if folder := r.URL.Query().Get("folder"); folder != "" {
 		photos = filterByFolder(photos, folder)
 	}
@@ -904,6 +939,81 @@ func tagSetFor(p *library.Photo) map[string]struct{} {
 		s[t] = struct{}{}
 	}
 	return s
+}
+
+// mergeSortedMedia returns the order-preserving merge of two
+// pre-sorted slices: photos straight from Library.Sorted and audios
+// projected into Photo shape. Both inputs share the same SortKey and
+// direction so the merge step is O(N+M) — no extra sort needed.
+//
+// Audio entries land on the wire as Photo-shaped JSON (zero
+// Width/Height/EXIF, AutoTags carrying kind:audio) so the frontend's
+// existing PhotoGrid renders them without a parallel type. The kind
+// is recoverable by inspecting AutoTags client-side; see
+// frontend/src/util/media.ts.
+func mergeSortedMedia(photos []*library.Photo, audios []*library.Audio, key library.SortKey, desc bool) []*library.Photo {
+	if len(audios) == 0 {
+		return photos
+	}
+	projected := make([]*library.Photo, len(audios))
+	for i, a := range audios {
+		p := library.AudioAsPhoto(a)
+		projected[i] = &p
+	}
+	if len(photos) == 0 {
+		return projected
+	}
+	out := make([]*library.Photo, 0, len(photos)+len(projected))
+	i, j := 0, 0
+	for i < len(photos) && j < len(projected) {
+		if mediaLess(photos[i], projected[j], key, desc) {
+			out = append(out, photos[i])
+			i++
+		} else {
+			out = append(out, projected[j])
+			j++
+		}
+	}
+	out = append(out, photos[i:]...)
+	out = append(out, projected[j:]...)
+	return out
+}
+
+// mediaLess reports whether a should sort before b under key/desc.
+// Mirrors the comparators in Library.rebuildIndicesLocked so the
+// merge order matches the per-slice sort order exactly.
+func mediaLess(a, b *library.Photo, key library.SortKey, desc bool) bool {
+	less := false
+	switch key {
+	case library.SortDate:
+		az, bz := a.TakenAt.IsZero(), b.TakenAt.IsZero()
+		switch {
+		case az != bz:
+			less = !az
+		case !a.TakenAt.Equal(b.TakenAt):
+			less = a.TakenAt.Before(b.TakenAt)
+		default:
+			less = a.Path < b.Path
+		}
+	case library.SortSize:
+		switch {
+		case a.SizeBytes != b.SizeBytes:
+			less = a.SizeBytes < b.SizeBytes
+		default:
+			less = a.Path < b.Path
+		}
+	default: // SortName
+		switch {
+		case a.Name != b.Name:
+			less = a.Name < b.Name
+		default:
+			less = a.Path < b.Path
+		}
+	}
+	if desc {
+		return !less
+	}
+	return less
 }
 
 // tokenizeQuery splits q on whitespace and lowercases each token,
@@ -1165,9 +1275,31 @@ func (h *LibraryHandler) rescanPlan(folder string) []string {
 // the walk so deleted files disappear from the library. Totals are
 // summarised in a trailing rescan:done event.
 func (h *LibraryHandler) runRescan(roots []string) {
+	slog.Info("rescan started", "roots", len(roots))
 	var pruned int
 	completed := 0
 	total := len(roots)
+	defer func() {
+		// Always emit rescan:done, even on a panic in PruneMissingUnder
+		// or a runner.Start error mid-sweep. The frontend gates its
+		// "Re-scanning…" UI on this event; missing it is what causes
+		// the status bar to get stuck.
+		if r := recover(); r != nil {
+			slog.Error("rescan panic", "error", r, "completed", completed, "total", total)
+		}
+		if h.publisher != nil {
+			h.publisher.Publish("rescan:done", map[string]any{
+				"roots":     completed,
+				"pruned":    pruned,
+				"requested": len(roots),
+			})
+		}
+		slog.Info("rescan finished",
+			"requested", len(roots),
+			"completed", completed,
+			"pruned", pruned,
+		)
+	}()
 	for i, root := range roots {
 		h.publishRescanProgress(i+1, total, root, "scan")
 		if _, err := h.runner.Start(root); err != nil {
@@ -1175,6 +1307,7 @@ func (h *LibraryHandler) runRescan(roots []string) {
 			// and here: stop the sweep. The scan:started/done
 			// stream from the other run keeps the UI honest; we
 			// just don't add to it.
+			slog.Warn("rescan aborted: runner.Start failed", "root", root, "error", err)
 			break
 		}
 		h.runner.WaitForActive()
@@ -1191,13 +1324,6 @@ func (h *LibraryHandler) runRescan(roots []string) {
 			}
 		}
 		completed++
-	}
-	if h.publisher != nil {
-		h.publisher.Publish("rescan:done", map[string]any{
-			"roots":     completed,
-			"pruned":    pruned,
-			"requested": len(roots),
-		})
 	}
 }
 

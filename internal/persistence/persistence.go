@@ -41,7 +41,11 @@ const magic = "KSTL"
 //     similarity groups the user marked "not a duplicate"). v1–v3
 //     payloads load with an empty dismissed set; next Save rewrites
 //     as v4.
-const CurrentVersion uint32 = 4
+// v5: appends a []*library.Audio slice carrying the audio half of the
+//     library (file paths, hashes, codec/duration/bitrate, audio
+//     PHash, tags). v1–v4 payloads load with an empty audio slice;
+//     next Save rewrites as v5.
+const CurrentVersion uint32 = 5
 
 // header is the first gob-encoded value in every metadata file. Kept
 // deliberately small so a future migration can read it without
@@ -69,11 +73,11 @@ func isSupportedVersion(v uint32) bool {
 	return v >= 1 && v <= CurrentVersion
 }
 
-// Save writes photos, the hidden-tag set, and the dismissed-cluster
-// set to path atomically: it encodes to a sibling "<path>.tmp" file
-// first, fsyncs, then renames over the destination. That way a crash
-// mid-write leaves the previous good file untouched.
-func Save(path string, photos []*library.Photo, hiddenTags []string, dismissedClusters []string) error {
+// Save writes photos, the hidden-tag set, the dismissed-cluster set,
+// and audio entries to path atomically: it encodes to a sibling
+// "<path>.tmp" file first, fsyncs, then renames over the destination.
+// That way a crash mid-write leaves the previous good file untouched.
+func Save(path string, photos []*library.Photo, hiddenTags []string, dismissedClusters []string, audios []*library.Audio) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating metadata dir for %s: %w", path, err)
 	}
@@ -116,6 +120,17 @@ func Save(path string, photos []*library.Photo, hiddenTags []string, dismissedCl
 		f.Close()
 		return fmt.Errorf("encoding dismissed clusters to %s: %w", tmp, err)
 	}
+	// Audio entries land in their own gob value, appended last so the
+	// v4 → v5 forward-compat scheme stays the same as previous versions.
+	// Always written — even as an empty slice — so the v5 shape is
+	// uniform.
+	if audios == nil {
+		audios = []*library.Audio{}
+	}
+	if err := enc.Encode(audios); err != nil {
+		f.Close()
+		return fmt.Errorf("encoding audios to %s: %w", tmp, err)
+	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return fmt.Errorf("flushing %s: %w", tmp, err)
@@ -129,20 +144,20 @@ func Save(path string, photos []*library.Photo, hiddenTags []string, dismissedCl
 	return nil
 }
 
-// Load reads photos, hidden tags, and dismissed clusters from path. A
-// missing file is not an error — it returns (nil, nil, nil, nil) so a
-// first-run binary can carry on with an empty library. A
-// present-but-corrupt file or a version mismatch returns a wrapped
+// Load reads photos, hidden tags, dismissed clusters, and audios from
+// path. A missing file is not an error — it returns (nil, nil, nil,
+// nil, nil) so a first-run binary can carry on with an empty library.
+// A present-but-corrupt file or a version mismatch returns a wrapped
 // error; the caller decides whether to keep going or abort. v1/v2
-// payloads decode with empty hidden-tag and dismissed-cluster slices;
-// v3 payloads decode with an empty dismissed-cluster slice.
-func Load(path string) ([]*library.Photo, []string, []string, error) {
+// payloads decode with empty hidden-tag, dismissed-cluster, and audio
+// slices; v3 with empty dismissed and audio; v4 with empty audio.
+func Load(path string) ([]*library.Photo, []string, []string, []*library.Audio, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil, nil
+			return nil, nil, nil, nil, nil
 		}
-		return nil, nil, nil, fmt.Errorf("opening %s: %w", path, err)
+		return nil, nil, nil, nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -150,33 +165,40 @@ func Load(path string) ([]*library.Photo, []string, []string, error) {
 
 	var h header
 	if err := dec.Decode(&h); err != nil {
-		return nil, nil, nil, fmt.Errorf("decoding header from %s: %w", path, err)
+		return nil, nil, nil, nil, fmt.Errorf("decoding header from %s: %w", path, err)
 	}
 	if h.Magic != magic {
-		return nil, nil, nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
+		return nil, nil, nil, nil, fmt.Errorf("checking magic in %s: %w", path, ErrBadMagic)
 	}
 	if !isSupportedVersion(h.Version) {
-		return nil, nil, nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
+		return nil, nil, nil, nil, fmt.Errorf("checking version in %s (got %d, want <=%d): %w",
 			path, h.Version, CurrentVersion, ErrUnknownVersion)
 	}
 
 	var photos []*library.Photo
 	if err := dec.Decode(&photos); err != nil {
-		return nil, nil, nil, fmt.Errorf("decoding photos from %s: %w", path, err)
+		return nil, nil, nil, nil, fmt.Errorf("decoding photos from %s: %w", path, err)
 	}
 
 	var hidden []string
 	if h.Version >= 3 {
 		if err := dec.Decode(&hidden); err != nil {
-			return nil, nil, nil, fmt.Errorf("decoding hidden tags from %s: %w", path, err)
+			return nil, nil, nil, nil, fmt.Errorf("decoding hidden tags from %s: %w", path, err)
 		}
 	}
 
 	var dismissed []string
 	if h.Version >= 4 {
 		if err := dec.Decode(&dismissed); err != nil {
-			return nil, nil, nil, fmt.Errorf("decoding dismissed clusters from %s: %w", path, err)
+			return nil, nil, nil, nil, fmt.Errorf("decoding dismissed clusters from %s: %w", path, err)
 		}
 	}
-	return photos, hidden, dismissed, nil
+
+	var audios []*library.Audio
+	if h.Version >= 5 {
+		if err := dec.Decode(&audios); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("decoding audios from %s: %w", path, err)
+		}
+	}
+	return photos, hidden, dismissed, audios, nil
 }

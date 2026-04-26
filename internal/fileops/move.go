@@ -42,12 +42,15 @@ func (m *Manager) Move(paths []string, opts MoveOptions) ([]Result, error) {
 	results := make([]Result, 0, len(paths))
 	undoItems := make([]OperationItem, 0, len(paths))
 
-	for _, src := range paths {
+	total := len(paths)
+	m.publishStarted("move", total)
+	for i, src := range paths {
 		res, item, ok := m.moveOne(src, opts)
 		results = append(results, res)
 		if ok {
 			undoItems = append(undoItems, item)
 		}
+		m.publishProgress("move", i+1, total)
 	}
 
 	// Persist once at the end of the batch. If persist fails, log it

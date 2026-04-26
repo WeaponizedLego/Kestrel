@@ -67,6 +67,7 @@ const (
 type Library struct {
 	mu     sync.RWMutex
 	photos map[string]*Photo
+	audios map[string]*Audio
 
 	// hiddenTags holds user-tag names the user has marked as "hide from
 	// the Tag Manager overview". Search/filter behaviour is unaffected —
@@ -86,13 +87,21 @@ type Library struct {
 	byName []*Photo
 	byDate []*Photo
 	bySize []*Photo
-	dirty  bool
+
+	// Audio sort indices mirror the photo ones. They live in the same
+	// dirty-flag scheme so a single rebuild covers any mutation.
+	audioByName []*Audio
+	audioByDate []*Audio
+	audioBySize []*Audio
+
+	dirty bool
 }
 
 // New returns an empty Library ready for concurrent use.
 func New() *Library {
 	return &Library{
 		photos:            make(map[string]*Photo),
+		audios:            make(map[string]*Audio),
 		hiddenTags:        make(map[string]struct{}),
 		dismissedClusters: make(map[string]struct{}),
 	}
@@ -245,20 +254,24 @@ func (l *Library) PruneMissingUnder(root string, exists func(path string) bool) 
 	return missing
 }
 
-// SetTags replaces the tag set on the photo at path. Input is
-// normalized (lowercased, trimmed, deduplicated) before storage, so
-// callers can pass whatever the user typed. Returns ErrPhotoNotFound
-// (wrapped) when path is unknown.
+// SetTags replaces the tag set on the media item at path. Photos are
+// tried first, then audios; either is acceptable. Input is normalized
+// (lowercased, trimmed, deduplicated) before storage, so callers can
+// pass whatever the user typed. Returns ErrPhotoNotFound (wrapped)
+// when path is unknown to either map.
 func (l *Library) SetTags(path string, tags []string) error {
 	normalized := NormalizeTags(tags)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	p, ok := l.photos[path]
-	if !ok {
-		return fmt.Errorf("setting tags on %s: %w", path, ErrPhotoNotFound)
+	if p, ok := l.photos[path]; ok {
+		p.Tags = normalized
+		return nil
 	}
-	p.Tags = normalized
-	return nil
+	if a, ok := l.audios[path]; ok {
+		a.Tags = normalized
+		return nil
+	}
+	return fmt.Errorf("setting tags on %s: %w", path, ErrPhotoNotFound)
 }
 
 // AddTagsToPaths merges tags into every photo in paths. Unknown paths
@@ -275,14 +288,20 @@ func (l *Library) AddTagsToPaths(paths []string, tags []string) int {
 
 	updated := 0
 	for _, path := range paths {
-		p, ok := l.photos[path]
-		if !ok {
+		if p, ok := l.photos[path]; ok {
+			merged, changed := mergeTags(p.Tags, additions)
+			if changed {
+				p.Tags = merged
+				updated++
+			}
 			continue
 		}
-		merged, changed := mergeTags(p.Tags, additions)
-		if changed {
-			p.Tags = merged
-			updated++
+		if a, ok := l.audios[path]; ok {
+			merged, changed := mergeTags(a.Tags, additions)
+			if changed {
+				a.Tags = merged
+				updated++
+			}
 		}
 	}
 	return updated
@@ -314,12 +333,22 @@ func (l *Library) AddTagsToFolder(folder string, tags []string) int {
 			updated++
 		}
 	}
+	for _, a := range l.audios {
+		if !strings.HasPrefix(a.Path, prefix) {
+			continue
+		}
+		merged, changed := mergeTags(a.Tags, additions)
+		if changed {
+			a.Tags = merged
+			updated++
+		}
+	}
 	return updated
 }
 
-// RemovePhotosInFolder deletes every photo whose path lives under
-// folder (transitively — sub-folder photos are included). Files on
-// disk are not touched; only the in-memory index is pruned. Returns
+// RemovePhotosInFolder deletes every photo and audio whose path lives
+// under folder (transitively — sub-folder items are included). Files
+// on disk are not touched; only the in-memory index is pruned. Returns
 // the list of removed paths so callers can publish counts and
 // invalidate dependent caches (cluster cache, etc.) only when there
 // was real work to do.
@@ -335,11 +364,17 @@ func (l *Library) RemovePhotosInFolder(folder string) []string {
 			removed = append(removed, path)
 		}
 	}
+	for path := range l.audios {
+		if strings.HasPrefix(path, prefix) {
+			removed = append(removed, path)
+		}
+	}
 	if len(removed) == 0 {
 		return nil
 	}
 	for _, path := range removed {
 		delete(l.photos, path)
+		delete(l.audios, path)
 	}
 	l.dirty = true
 	return removed
@@ -354,10 +389,13 @@ type FolderBucket struct {
 	Photos []Photo
 }
 
-// UntaggedByFolder returns every photo with no user tags, grouped by
-// filepath.Dir(Path). AutoTags are intentionally ignored — matching the
-// cluster.Progress definition of "untagged". Use this to feed an
-// onboarding / catch-up tagging view that mirrors the on-disk layout.
+// UntaggedByFolder returns every photo and audio with no user tags,
+// grouped by filepath.Dir(Path). AutoTags are intentionally ignored —
+// matching the cluster.Progress definition of "untagged". Use this to
+// feed an onboarding / catch-up tagging view that mirrors the on-disk
+// layout. Audio entries are projected into Photo shape (zero
+// Width/Height/EXIF) so the tagging queue can render them in the same
+// grid as photos.
 func (l *Library) UntaggedByFolder() []FolderBucket {
 	l.mu.RLock()
 	buckets := make(map[string][]Photo)
@@ -367,6 +405,13 @@ func (l *Library) UntaggedByFolder() []FolderBucket {
 		}
 		folder := filepath.Dir(p.Path)
 		buckets[folder] = append(buckets[folder], *p)
+	}
+	for _, a := range l.audios {
+		if len(a.Tags) > 0 {
+			continue
+		}
+		folder := filepath.Dir(a.Path)
+		buckets[folder] = append(buckets[folder], AudioAsPhoto(a))
 	}
 	l.mu.RUnlock()
 
@@ -446,6 +491,14 @@ func (l *Library) AllTagsFiltered(includeHidden, includeAuto bool) []TagStat {
 			userCounts[t]++
 		}
 	}
+	for _, a := range l.audios {
+		if len(a.Tags) == 0 {
+			untaggedCount++
+		}
+		for _, t := range a.Tags {
+			userCounts[t]++
+		}
+	}
 
 	out := make([]TagStat, 0, len(userCounts)+len(l.hiddenTags))
 	for name, count := range userCounts {
@@ -481,6 +534,11 @@ func (l *Library) AllTagsFiltered(includeHidden, includeAuto bool) []TagStat {
 		autoCounts := make(map[string]int)
 		for _, p := range l.photos {
 			for _, t := range p.AutoTags {
+				autoCounts[t]++
+			}
+		}
+		for _, a := range l.audios {
+			for _, t := range a.AutoTags {
 				autoCounts[t]++
 			}
 		}
@@ -673,7 +731,16 @@ func (l *Library) RenameTag(old, next string) (renamed, absorbed int, err error)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, p := range l.photos {
-		r, a := replaceTag(p, oldNorm, newNorm)
+		r, a := replaceTagOnSlice(&p.Tags, oldNorm, newNorm)
+		if r {
+			renamed++
+		}
+		if a {
+			absorbed++
+		}
+	}
+	for _, au := range l.audios {
+		r, a := replaceTagOnSlice(&au.Tags, oldNorm, newNorm)
 		if r {
 			renamed++
 		}
@@ -711,7 +778,16 @@ func (l *Library) MergeTags(source, target string) (renamed, absorbed int, err e
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, p := range l.photos {
-		r, a := replaceTag(p, srcNorm, tgtNorm)
+		r, a := replaceTagOnSlice(&p.Tags, srcNorm, tgtNorm)
+		if r {
+			renamed++
+		}
+		if a {
+			absorbed++
+		}
+	}
+	for _, au := range l.audios {
+		r, a := replaceTagOnSlice(&au.Tags, srcNorm, tgtNorm)
 		if r {
 			renamed++
 		}
@@ -744,27 +820,35 @@ func (l *Library) DeleteTag(name string) int {
 		p.Tags = append(p.Tags[:idx], p.Tags[idx+1:]...)
 		affected++
 	}
+	for _, a := range l.audios {
+		idx := indexOfTag(a.Tags, norm)
+		if idx < 0 {
+			continue
+		}
+		a.Tags = append(a.Tags[:idx], a.Tags[idx+1:]...)
+		affected++
+	}
 	// Deleting a tag also drops its hidden flag; a later re-creation
 	// of the same name should start visible.
 	delete(l.hiddenTags, norm)
 	return affected
 }
 
-// replaceTag swaps old for next on one photo. Returns (renamed,
-// absorbed): renamed is true when old was present and next was not, so
-// the slot was overwritten in place; absorbed is true when both were
-// present, so old was removed and next stays. At most one of them is
-// true on any given photo.
-func replaceTag(p *Photo, old, next string) (renamed, absorbed bool) {
-	oldIdx := indexOfTag(p.Tags, old)
+// replaceTagOnSlice swaps old for next on a tag slice in place.
+// Returns (renamed, absorbed): renamed is true when old was present
+// and next was not, so the slot was overwritten in place; absorbed is
+// true when both were present, so old was removed and next stays. At
+// most one is true on any given call.
+func replaceTagOnSlice(tags *[]string, old, next string) (renamed, absorbed bool) {
+	oldIdx := indexOfTag(*tags, old)
 	if oldIdx < 0 {
 		return false, false
 	}
-	if indexOfTag(p.Tags, next) >= 0 {
-		p.Tags = append(p.Tags[:oldIdx], p.Tags[oldIdx+1:]...)
+	if indexOfTag(*tags, next) >= 0 {
+		*tags = append((*tags)[:oldIdx], (*tags)[oldIdx+1:]...)
 		return false, true
 	}
-	p.Tags[oldIdx] = next
+	(*tags)[oldIdx] = next
 	return true, false
 }
 
@@ -929,11 +1013,13 @@ func (l *Library) indexForLocked(key SortKey) []*Photo {
 	}
 }
 
-// rebuildIndicesLocked regenerates byName / byDate / bySize from the
-// map. Caller must hold l.mu for writing. Sorts are stable and break
-// ties on Path so the output is deterministic across runs — handy
-// for tests and for pagination stability in the UI.
+// rebuildIndicesLocked regenerates byName / byDate / bySize and their
+// audio counterparts from the maps. Caller must hold l.mu for
+// writing. Sorts are stable and break ties on Path so the output is
+// deterministic across runs — handy for tests and for pagination
+// stability in the UI.
 func (l *Library) rebuildIndicesLocked() {
+	l.rebuildAudioIndicesLocked()
 	base := make([]*Photo, 0, len(l.photos))
 	for _, p := range l.photos {
 		base = append(base, p)

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { apiPost, friendlyError, photoSrc } from '../transport/api'
 import type { Photo } from '../types'
-import { isVideo } from '../util/media'
+import { isAudio, isVideo } from '../util/media'
 import { copyImageViaCanvas } from '../util/clipboardFallback'
 
 const props = defineProps<{ photo: Photo }>()
@@ -14,6 +14,7 @@ const emit = defineEmits<{
 
 const src = computed(() => photoSrc(props.photo.Path))
 const video = computed(() => isVideo(props.photo))
+const audio = computed(() => isAudio(props.photo))
 
 function onKey(e: KeyboardEvent) {
   switch (e.key) {
@@ -50,7 +51,7 @@ const copyError = ref<string | null>(null)
 let copyResetTimer: number | null = null
 
 async function copyImage() {
-  if (copyState.value === 'copying' || video.value) return
+  if (copyState.value === 'copying' || video.value || audio.value) return
   copyError.value = null
   copyState.value = 'copying'
   try {
@@ -108,6 +109,19 @@ function flashCopyState(next: 'copied' | 'error') {
           preload="metadata"
           class="absolute inset-0 m-auto max-h-full max-w-full rounded"
         />
+        <div
+          v-else-if="audio"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-6 px-6"
+        >
+          <p class="break-all text-center text-base font-medium" :title="photo.Name">{{ photo.Name }}</p>
+          <audio
+            :src="src"
+            controls
+            autoplay
+            preload="metadata"
+            class="w-full max-w-xl"
+          />
+        </div>
         <img
           v-else
           :src="src"
@@ -121,7 +135,7 @@ function flashCopyState(next: 'copied' | 'error') {
           <button type="button" class="btn btn-sm btn-outline" aria-label="Previous photo" @click="emit('prev')">← Prev</button>
           <button type="button" class="btn btn-sm btn-outline" aria-label="Next photo" @click="emit('next')">Next →</button>
           <button
-            v-if="!video"
+            v-if="!video && !audio"
             type="button"
             :class="[
               'btn btn-sm',

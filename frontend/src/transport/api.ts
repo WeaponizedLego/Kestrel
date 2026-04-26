@@ -49,18 +49,30 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>
 }
 
-// apiError builds a single Error whose message is the server's JSON
+// ApiError carries the HTTP status alongside the user-facing message
+// so callers can branch on specific codes (e.g. 409 Conflict) without
+// re-parsing the message string.
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+// apiError builds an ApiError whose message is the server's JSON
 // {"error": "..."} payload when present, falling back to the status
 // line. Callers surface .message directly to users, so keep it short
 // and punctuation-free.
-async function apiError(path: string, res: Response): Promise<Error> {
+async function apiError(path: string, res: Response): Promise<ApiError> {
   try {
     const body = (await res.json()) as { error?: string }
-    if (body?.error) return new Error(body.error)
+    if (body?.error) return new ApiError(body.error, res.status)
   } catch {
     // response wasn't JSON — fall through.
   }
-  return new Error(`${path} failed (${res.status} ${res.statusText})`)
+  return new ApiError(`${path} failed (${res.status} ${res.statusText})`, res.status)
 }
 
 // friendlyError turns a thrown value into a user-facing string. Used

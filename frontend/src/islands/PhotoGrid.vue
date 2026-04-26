@@ -28,7 +28,7 @@ import { requestedSearchTokens } from '../transport/search'
 import { copyImageToClipboard } from '../transport/clipboard'
 import { requestDelete, requestMove } from '../transport/fileops'
 import type { Photo } from '../types'
-import { isVideo } from '../util/media'
+import { isAudio, isVideo } from '../util/media'
 
 // Lazy-loaded so the viewer JS/CSS only downloads when a user opens
 // a photo — matches TASKS.md Phase 8 "PhotoViewer lazy-loaded via
@@ -408,7 +408,10 @@ function openCtxMenu(index: number, e: MouseEvent) {
     ctxTargets.value = [path]
   }
   ctxIndex.value = index
-  ctxIsVideo.value = isVideo(photo)
+  // "Copy image" is meaningless for non-image media; reuse the
+  // existing ctxIsVideo gate to also cover audio so the same menu
+  // item is disabled for both kinds.
+  ctxIsVideo.value = isVideo(photo) || isAudio(photo)
   ctxX.value = e.clientX
   ctxY.value = e.clientY
   ctxCopyError.value = null
@@ -1008,6 +1011,18 @@ watch(cellSize, (_newSize, oldSize) => {
             >
               <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
                 <path d="M4 3 L11 7 L4 11 Z" fill="currentColor" />
+              </svg>
+            </span>
+            <span
+              v-else-if="isAudio(cell.photo)"
+              class="photo-grid__video-badge"
+              aria-label="Audio"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <path
+                  d="M9 2 L9 9.2 A2 2 0 1 1 7.6 7.4 L7.6 4.5 L5 5 L5 10 A2 2 0 1 1 3.6 8.2 L3.6 4 L9 2 Z"
+                  fill="currentColor"
+                />
               </svg>
             </span>
           </button>

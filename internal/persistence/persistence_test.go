@@ -31,12 +31,26 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	}
 	wantHidden := []string{"secret", "wip"}
 	wantDismissed := []string{"fp-aaa", "fp-bbb"}
+	wantAudios := []*library.Audio{
+		{
+			Path:        "/p/song.mp3",
+			Hash:        "feedface",
+			Name:        "song.mp3",
+			SizeBytes:   4096,
+			ModTime:     time.Unix(1_700_000_100, 0).UTC(),
+			Codec:       "mp3",
+			DurationSec: 212.5,
+			BitrateKbps: 192,
+			Channels:    2,
+			PHash:       0xabcdef0123456789,
+		},
+	}
 
-	if err := Save(path, want, wantHidden, wantDismissed); err != nil {
+	if err := Save(path, want, wantHidden, wantDismissed, wantAudios); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	got, hidden, dismissed, err := Load(path)
+	got, hidden, dismissed, audios, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -54,16 +68,24 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(dismissed, wantDismissed) {
 		t.Errorf("dismissed clusters: got %v, want %v", dismissed, wantDismissed)
 	}
+	if len(audios) != len(wantAudios) {
+		t.Fatalf("len(audios) = %d, want %d", len(audios), len(wantAudios))
+	}
+	for i := range wantAudios {
+		if !reflect.DeepEqual(*audios[i], *wantAudios[i]) {
+			t.Errorf("audio %d: got %+v, want %+v", i, *audios[i], *wantAudios[i])
+		}
+	}
 }
 
 func TestLoad_MissingFileReturnsNil(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.gob")
-	got, hidden, dismissed, err := Load(path)
+	got, hidden, dismissed, audios, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load(missing): unexpected error %v", err)
 	}
-	if got != nil || hidden != nil || dismissed != nil {
-		t.Fatalf("Load(missing): got %v / %v / %v, want nil / nil / nil", got, hidden, dismissed)
+	if got != nil || hidden != nil || dismissed != nil || audios != nil {
+		t.Fatalf("Load(missing): got %v / %v / %v / %v, want all nil", got, hidden, dismissed, audios)
 	}
 }
 
@@ -80,7 +102,7 @@ func TestLoad_BadMagic(t *testing.T) {
 	}
 	f.Close()
 
-	if _, _, _, err := Load(path); !errors.Is(err, ErrBadMagic) {
+	if _, _, _, _, err := Load(path); !errors.Is(err, ErrBadMagic) {
 		t.Fatalf("expected ErrBadMagic, got %v", err)
 	}
 }
@@ -96,7 +118,7 @@ func TestLoad_UnknownVersion(t *testing.T) {
 	}
 	f.Close()
 
-	if _, _, _, err := Load(path); !errors.Is(err, ErrUnknownVersion) {
+	if _, _, _, _, err := Load(path); !errors.Is(err, ErrUnknownVersion) {
 		t.Fatalf("expected ErrUnknownVersion, got %v", err)
 	}
 }
@@ -109,13 +131,13 @@ func TestSave_AtomicReplace(t *testing.T) {
 		{Path: "/p/y.jpg", Name: "y.jpg", SizeBytes: 10},
 	}
 
-	if err := Save(path, first, nil, nil); err != nil {
+	if err := Save(path, first, nil, nil, nil); err != nil {
 		t.Fatalf("Save first: %v", err)
 	}
-	if err := Save(path, second, nil, nil); err != nil {
+	if err := Save(path, second, nil, nil, nil); err != nil {
 		t.Fatalf("Save second: %v", err)
 	}
-	got, _, _, err := Load(path)
+	got, _, _, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -147,7 +169,7 @@ func TestLoad_V2IsForwardCompat(t *testing.T) {
 	}
 	f.Close()
 
-	got, hidden, dismissed, err := Load(path)
+	got, hidden, dismissed, audios, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load v2: %v", err)
 	}
@@ -159,6 +181,9 @@ func TestLoad_V2IsForwardCompat(t *testing.T) {
 	}
 	if len(dismissed) != 0 {
 		t.Fatalf("dismissed: got %v, want empty", dismissed)
+	}
+	if len(audios) != 0 {
+		t.Fatalf("audios: got %v, want empty", audios)
 	}
 }
 
@@ -184,7 +209,7 @@ func TestLoad_V3IsForwardCompat(t *testing.T) {
 	}
 	f.Close()
 
-	got, hidden, dismissed, err := Load(path)
+	got, hidden, dismissed, audios, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load v3: %v", err)
 	}
@@ -196,5 +221,51 @@ func TestLoad_V3IsForwardCompat(t *testing.T) {
 	}
 	if len(dismissed) != 0 {
 		t.Fatalf("dismissed: got %v, want empty", dismissed)
+	}
+	if len(audios) != 0 {
+		t.Fatalf("audios: got %v, want empty", audios)
+	}
+}
+
+// TestLoad_V4IsForwardCompat verifies a v4 file (header + photos +
+// hidden tags + dismissed clusters, no audio slice) still decodes
+// cleanly under the v5 reader — the audio set comes back empty.
+func TestLoad_V4IsForwardCompat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library_meta.gob")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := gob.NewEncoder(f)
+	if err := enc.Encode(header{Magic: magic, Version: 4}); err != nil {
+		t.Fatal(err)
+	}
+	photos := []*library.Photo{{Path: "/p/a.jpg", Name: "a.jpg"}}
+	if err := enc.Encode(photos); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode([]string{"wip"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode([]string{"fp-x"}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	got, hidden, dismissed, audios, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load v4: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("photos: got %d, want 1", len(got))
+	}
+	if len(hidden) != 1 || hidden[0] != "wip" {
+		t.Fatalf("hidden: got %v, want [wip]", hidden)
+	}
+	if len(dismissed) != 1 || dismissed[0] != "fp-x" {
+		t.Fatalf("dismissed: got %v, want [fp-x]", dismissed)
+	}
+	if len(audios) != 0 {
+		t.Fatalf("audios: got %v, want empty", audios)
 	}
 }

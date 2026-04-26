@@ -12,3 +12,16 @@ export function isVideo(photo: Photo): boolean {
   }
   return false
 }
+
+// isAudio reports whether a photo entry is actually an audio file.
+// Audio entries land on the wire as Photo-shaped JSON (see
+// internal/api mergeSortedMedia) with a kind:audio auto-tag — the
+// frontend uses this gate to render the audio badge in the grid and
+// the <audio> element in the lightbox / details panel.
+export function isAudio(photo: Photo): boolean {
+  const auto = photo.AutoTags ?? []
+  for (const t of auto) {
+    if (t === 'kind:audio') return true
+  }
+  return false
+}

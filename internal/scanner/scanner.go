@@ -33,6 +33,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/library"
 	"github.com/WeaponizedLego/kestrel/internal/metadata"
 	"github.com/WeaponizedLego/kestrel/internal/metadata/autotag"
+	"github.com/WeaponizedLego/kestrel/internal/metadata/fingerprint"
 )
 
 // pathQueueSize bounds how many discovered paths can sit in the channel
@@ -77,6 +78,14 @@ type Library interface {
 	AddPhoto(p *library.Photo)
 	GetPhoto(path string) (*library.Photo, error)
 	Len() int
+
+	// AddAudio mirrors AddPhoto for audio files. Audio entries live
+	// in a sibling map (see internal/library) and never enter the
+	// photo cluster bucket.
+	AddAudio(a *library.Audio)
+	// GetAudio is the audio analogue of GetPhoto, used by the
+	// skip-unchanged fast path.
+	GetAudio(path string) (*library.Audio, error)
 }
 
 // Options parameterises Scan. Publisher, ThumbStore and Thumbnailer
@@ -138,6 +147,34 @@ var supportedExts = map[string]struct{}{
 	".avi":  {},
 	".mkv":  {},
 	".webm": {},
+	// Audio — must stay in lockstep with autotag.audioExts /
+	// metadata.audioExts / thumbnail.audioExts.
+	".mp3":  {},
+	".m4a":  {},
+	".aac":  {},
+	".flac": {},
+	".wav":  {},
+	".ogg":  {},
+	".opus": {},
+}
+
+// audioExts is the scanner's local copy used to branch processing
+// between photo/video and audio paths. Mirrors the audio entries
+// above.
+var audioExts = map[string]struct{}{
+	".mp3":  {},
+	".m4a":  {},
+	".aac":  {},
+	".flac": {},
+	".wav":  {},
+	".ogg":  {},
+	".opus": {},
+}
+
+// isAudioPath reports whether path is a recognised audio file.
+func isAudioPath(path string) bool {
+	_, ok := audioExts[strings.ToLower(filepath.Ext(path))]
+	return ok
 }
 
 // Scan walks root in parallel and writes each discovered photo
@@ -281,19 +318,31 @@ func processPaths(
 				continue
 			}
 
-			photo, err := buildPhoto(path, opts.Autotag)
-			if err != nil {
-				slog.Warn("scanner skipping file", "path", path, "err", err)
-				continue
+			if isAudioPath(path) {
+				audio, err := buildAudio(path)
+				if err != nil {
+					slog.Warn("scanner skipping audio", "path", path, "err", err)
+					continue
+				}
+				if err := storeAudioThumbnail(audio, opts); err != nil {
+					slog.Warn("audio thumbnail generation failed", "path", path, "err", err)
+				}
+				lib.AddAudio(audio)
+			} else {
+				photo, err := buildPhoto(path, opts.Autotag)
+				if err != nil {
+					slog.Warn("scanner skipping file", "path", path, "err", err)
+					continue
+				}
+				if err := storeThumbnail(photo, opts); err != nil {
+					// Thumb generation is best-effort — a broken thumbnail
+					// must not lose the photo from the library. pHash stays
+					// zero, cluster.Manager will skip the photo until the
+					// next successful rebuild.
+					slog.Warn("thumbnail generation failed", "path", path, "err", err)
+				}
+				lib.AddPhoto(photo)
 			}
-			if err := storeThumbnail(photo, opts); err != nil {
-				// Thumb generation is best-effort — a broken thumbnail
-				// must not lose the photo from the library. pHash stays
-				// zero, cluster.Manager will skip the photo until the
-				// next successful rebuild.
-				slog.Warn("thumbnail generation failed", "path", path, "err", err)
-			}
-			lib.AddPhoto(photo)
 
 			n := added.Add(1)
 			publishProgress(opts, n, root, discovered)
@@ -345,11 +394,18 @@ func throttle(ctx context.Context, d time.Duration) bool {
 // missing entry or unreadable file) returns false: when in doubt,
 // do the full build.
 func unchanged(path string, lib Library) bool {
-	existing, err := lib.GetPhoto(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
-	info, err := os.Stat(path)
+	if isAudioPath(path) {
+		existing, err := lib.GetAudio(path)
+		if err != nil {
+			return false
+		}
+		return existing.SizeBytes == info.Size() && existing.ModTime.Equal(info.ModTime())
+	}
+	existing, err := lib.GetPhoto(path)
 	if err != nil {
 		return false
 	}
@@ -435,6 +491,68 @@ func buildPhoto(path string, autotagOpts autotag.Options) (*library.Photo, error
 		CameraMake: meta.CameraMake,
 		AutoTags:   autotag.Derive(path, meta, autotagOpts),
 	}, nil
+}
+
+// buildAudio stats path, hashes the file contents, runs ffprobe for
+// codec/duration/bitrate/channels, computes the Chromaprint
+// fingerprint, and derives the autotag set. Errors from stat / hash
+// abort the build (the worker logs and skips); ffprobe and fpcalc
+// are best-effort, so a missing tool yields zero metadata and a
+// zero PHash respectively.
+func buildAudio(path string) (*library.Audio, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat for %s: %w", path, err)
+	}
+	hash, err := hashFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("hashing %s: %w", path, err)
+	}
+	am := metadata.ExtractAudio(path)
+	phash, err := fingerprint.AudioPHash(path)
+	if err != nil {
+		// Already best-effort inside the package; log and continue.
+		slog.Warn("audio fingerprint failed", "path", path, "err", err)
+		phash = 0
+	}
+	return &library.Audio{
+		Path:        path,
+		Hash:        hash,
+		Name:        filepath.Base(path),
+		SizeBytes:   info.Size(),
+		ModTime:     info.ModTime(),
+		Codec:       am.Codec,
+		DurationSec: am.DurationSec,
+		BitrateKbps: am.BitrateKbps,
+		Channels:    am.Channels,
+		PHash:       phash,
+		AutoTags:    autotag.DeriveAudio(path, info.ModTime(), am),
+	}, nil
+}
+
+// storeAudioThumbnail renders a filename-card thumbnail for the
+// audio file and stores it in the pack keyed by the audio's hash.
+// Mirrors storeThumbnail's contract: a zero Thumbnailer or zero
+// ThumbStore is a no-op, and a render failure is logged by the
+// caller rather than failing the audio's library entry.
+func storeAudioThumbnail(audio *library.Audio, opts Options) error {
+	if opts.Thumbnailer == nil || opts.ThumbStore == nil {
+		return nil
+	}
+	data, _, err := opts.Thumbnailer(audio.Path)
+	if err != nil {
+		return fmt.Errorf("rendering: %w", err)
+	}
+	hashBytes, err := hex.DecodeString(audio.Hash)
+	if err != nil || len(hashBytes) != 32 {
+		return fmt.Errorf("decoding hash %q: %w", audio.Hash, err)
+	}
+	var hash [32]byte
+	copy(hash[:], hashBytes)
+	if err := opts.ThumbStore.Put(hash, data); err != nil {
+		return fmt.Errorf("storing: %w", err)
+	}
+	return nil
 }
 
 // hashFile streams path through SHA-256 and returns the hex digest.
