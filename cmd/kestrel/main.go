@@ -75,6 +75,8 @@ func main() {
 	debug := flag.Bool("debug", false, "enable debug-level logging")
 	flag.Parse()
 
+	platform.EnsureToolPath()
+
 	logPath, closeLog := initLogging(*debug)
 	defer closeLog()
 
