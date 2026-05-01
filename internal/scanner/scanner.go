@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -114,7 +113,42 @@ type Options struct {
 	// rescans feel glacial. The sleep is ctx-aware so a cancel is
 	// still prompt.
 	ThrottleSleep time.Duration
+
+	// OnDirsFound, if non-nil, receives batches of absolute directory
+	// paths as the parallel walker discovers them, including root
+	// itself. Used by the API layer to register every directory under
+	// a freshly-added root as its own sub-root in watchroots.Store.
+	// Callbacks fire from a background goroutine; the implementation
+	// must be safe to call from arbitrary goroutines.
+	OnDirsFound func(dirs []string)
+
+	// SingleThreadWalk forces the legacy single-threaded directory
+	// walk regardless of the KESTREL_SINGLE_THREAD_WALK env var.
+	// Useful for tests that need parity with the old behaviour.
+	SingleThreadWalk bool
 }
+
+// WorkerStatus is one entry in the "scan:workers" event payload. Kind
+// is one of "walking", "hashing", or "idle"; the heartbeat goroutine
+// in Scan publishes a snapshot of every active worker periodically so
+// the UI can show what each core is doing without per-event WS
+// chatter.
+type WorkerStatus struct {
+	ID      int    `json:"id"`
+	Current string `json:"current"`
+	Kind    string `json:"kind"`
+}
+
+const (
+	workerKindIdle    = "idle"
+	workerKindHashing = "hashing"
+	workerKindWalking = "walking"
+)
+
+// workerHeartbeat is how often the scanner snapshots and publishes
+// per-worker status. Fast enough that the UI feels alive, slow enough
+// that millions of files don't translate into millions of WS frames.
+const workerHeartbeat = 200 * time.Millisecond
 
 // Progress is the payload of a "scan:progress" event. Total is -1
 // while the walk is still discovering files, flipping to the final
@@ -205,23 +239,63 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 	// emissions carry a real total as soon as enumeration is done.
 	var discovered atomic.Int64
 	discovered.Store(-1)
+	// Compose the walker's directory-discovery callback so a single
+	// batch fans out both to the caller's hook (e.g. registering
+	// sub-roots) and to the WS hub as a "scan:dirs-found" event the UI
+	// renders into its discovery view.
+	var totalDirs atomic.Int64
+	dirsCb := opts.OnDirsFound
+	if opts.Publisher != nil {
+		original := dirsCb
+		dirsCb = func(batch []string) {
+			if original != nil {
+				original(batch)
+			}
+			n := totalDirs.Add(int64(len(batch)))
+			opts.Publisher.Publish("scan:dirs-found", map[string]any{
+				"root":  root,
+				"paths": batch,
+				"total": n,
+			})
+		}
+	}
+
 	go func() {
-		count, err := walkPaths(ctx, root, paths)
+		wopts := walkOptions{
+			Workers:      workerCount(opts),
+			OnDirsFound:  dirsCb,
+			SingleThread: opts.SingleThreadWalk,
+		}
+		count, err := walkPathsBFS(ctx, root, paths, wopts)
 		discovered.Store(int64(count))
 		walkErrCh <- err
 		close(paths)
 	}()
 
+	processorCount := workerCount(opts)
+	slots := make([]*atomic.Pointer[string], processorCount)
+	for i := range slots {
+		slots[i] = &atomic.Pointer[string]{}
+	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		runWorkerHeartbeat(heartbeatCtx, opts.Publisher, root, slots)
+	}()
+
 	var added atomic.Int64
 	var workers sync.WaitGroup
-	for range workerCount(opts) {
+	for i := range processorCount {
 		workers.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer workers.Done()
-			processPaths(ctx, paths, lib, opts, root, &added, &discovered)
-		}()
+			processPaths(ctx, paths, lib, opts, root, &added, &discovered, slots[workerID])
+		}(i)
 	}
 	workers.Wait()
+	stopHeartbeat()
+	<-heartbeatDone
 	walkErr := <-walkErrCh
 
 	total := int(added.Load())
@@ -242,40 +316,6 @@ func Scan(ctx context.Context, root string, lib Library, opts Options) (int, err
 	return total, nil
 }
 
-// walkPaths is the producer half of the pool: it walks the tree and
-// pushes every supported image path onto paths. It returns the number
-// of paths successfully enqueued so the caller can publish a known
-// total once enumeration is done. Stops early if ctx is cancelled or
-// filepath.WalkDir reports an error on the root itself.
-func walkPaths(ctx context.Context, root string, paths chan<- string) (int, error) {
-	slog.Info("scan walking root", "root", root)
-	var count int
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return fmt.Errorf("walking %s: %w", path, err)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if d.IsDir() || !isSupportedMedia(path) {
-			return nil
-		}
-		select {
-		case paths <- path:
-			count++
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
-	if err != nil {
-		slog.Info("scan walk ended", "root", root, "queued", count, "err", err)
-	} else {
-		slog.Info("scan walk complete", "root", root, "queued", count)
-	}
-	return count, err
-}
-
 // processPaths is the consumer half: each worker pulls paths, builds
 // the Photo, optionally renders a thumbnail, and writes the result
 // straight into lib. Per-file failures are logged and skipped — the
@@ -286,6 +326,10 @@ func walkPaths(ctx context.Context, root string, paths chan<- string) (int, erro
 // emits scan:progress whenever its increment crosses a progressEvery
 // boundary, so updates arrive at roughly the same cadence as in a
 // single-producer model regardless of which worker finished first.
+//
+// slot is the worker's status slot; the worker writes a pointer to
+// the path it's currently hashing so the heartbeat goroutine can
+// publish a coherent snapshot. nil clears the slot.
 func processPaths(
 	ctx context.Context,
 	paths <-chan string,
@@ -294,7 +338,9 @@ func processPaths(
 	root string,
 	added *atomic.Int64,
 	discovered *atomic.Int64,
+	slot *atomic.Pointer[string],
 ) {
+	defer slot.Store(nil)
 	for {
 		select {
 		case <-ctx.Done():
@@ -303,6 +349,8 @@ func processPaths(
 			if !ok {
 				return
 			}
+			current := path
+			slot.Store(&current)
 
 			// Skip-unchanged fast path. If the library already has an
 			// entry for this path whose size + mtime match what's on
@@ -351,6 +399,46 @@ func processPaths(
 			}
 		}
 	}
+}
+
+// runWorkerHeartbeat periodically snapshots the per-worker slots and
+// publishes a "scan:workers" event with each worker's current path.
+// Returns when ctx is cancelled (the scan is finishing). One emitted
+// snapshot per heartbeat regardless of throughput keeps the WS rate
+// constant.
+func runWorkerHeartbeat(ctx context.Context, pub Publisher, root string, slots []*atomic.Pointer[string]) {
+	if pub == nil || len(slots) == 0 {
+		return
+	}
+	ticker := time.NewTicker(workerHeartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// Final emit so the UI sees workers idle out cleanly.
+			pub.Publish("scan:workers", snapshotWorkers(slots, root))
+			return
+		case <-ticker.C:
+			pub.Publish("scan:workers", snapshotWorkers(slots, root))
+		}
+	}
+}
+
+// snapshotWorkers reads each worker slot and returns a JSON-friendly
+// status slice. A nil slot is reported as "idle" so the UI can render
+// a row per core regardless of activity.
+func snapshotWorkers(slots []*atomic.Pointer[string], root string) []WorkerStatus {
+	out := make([]WorkerStatus, len(slots))
+	for i, slot := range slots {
+		s := WorkerStatus{ID: i, Kind: workerKindIdle}
+		if p := slot.Load(); p != nil {
+			s.Current = *p
+			s.Kind = workerKindHashing
+		}
+		out[i] = s
+	}
+	_ = root // reserved for future per-root scoping if scans interleave.
+	return out
 }
 
 // workerCount resolves opts.Workers into a usable pool size, clamped

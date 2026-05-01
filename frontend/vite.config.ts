@@ -39,6 +39,7 @@ const islandEntries = {
   similarityReview: 'src/islands/SimilarityReview.entry.ts',
   tagManager:   'src/islands/TagManager.entry.ts',
   fileOps:      'src/islands/FileOps.entry.ts',
+  scanDetail:   'src/islands/ScanDetail.entry.ts',
 }
 
 export default defineConfig({

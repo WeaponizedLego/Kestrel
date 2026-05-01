@@ -1,13 +1,15 @@
 // Package rescan drives the background sync loop that keeps the
-// library in step with disk. Every watched root is periodically
+// library in step with disk. Every watched sub-root is periodically
 // re-walked in a low-intensity mode — fewer workers, a small per-file
 // sleep, preemptible by user-triggered scans — so a user can leave
 // Kestrel open in the background (gaming, watching video) without
 // feeling it grind.
 //
 // The design is deliberately small: one goroutine, one ticker, no
-// queues. New or deleted files on disk show up on the next cycle;
-// nothing here tries to react to filesystem events in real time.
+// queues. The fast path for newly-added files is the fsnotify-driven
+// internal/watcher package; this scheduler is the backstop that
+// catches missed events, prunes deletions, and copes with network
+// mounts that don't deliver kernel notifications.
 package rescan
 
 import (
@@ -28,9 +30,9 @@ import (
 // the library stays roughly accurate, not so it reflects filesystem
 // edits within seconds.
 const (
-	DefaultInterval      = 15 * time.Minute
+	DefaultInterval      = 30 * time.Minute
 	DefaultIdleThreshold = 2 * time.Minute
-	DefaultPerRootGap    = 30 * time.Second
+	DefaultPerRootGap    = 5 * time.Second
 	DefaultThrottleSleep = 10 * time.Millisecond
 )
 

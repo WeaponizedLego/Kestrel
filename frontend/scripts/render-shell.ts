@@ -22,6 +22,7 @@ const islandEntries = [
   '/src/islands/SimilarityReview.entry.ts',
   '/src/islands/TagManager.entry.ts',
   '/src/islands/FileOps.entry.ts',
+  '/src/islands/ScanDetail.entry.ts',
 ]
 
 // Runs in <head> before any island bootstraps so daisyUI's data-theme

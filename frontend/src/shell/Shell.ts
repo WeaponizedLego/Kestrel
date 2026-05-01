@@ -42,6 +42,7 @@ export const Shell = defineComponent({
         h('div', { 'data-island': 'similarity-review' }),
         h('div', { 'data-island': 'tag-manager' }),
         h('div', { 'data-island': 'file-ops' }),
+        h('div', { 'data-island': 'scan-detail' }),
       ],
     )
   },

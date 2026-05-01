@@ -33,6 +33,7 @@ import (
 	"github.com/WeaponizedLego/kestrel/internal/server"
 	"github.com/WeaponizedLego/kestrel/internal/settings"
 	"github.com/WeaponizedLego/kestrel/internal/thumbnail"
+	"github.com/WeaponizedLego/kestrel/internal/watcher"
 	"github.com/WeaponizedLego/kestrel/internal/watchroots"
 )
 
@@ -185,6 +186,17 @@ func run(devMode bool, bind string, logPath string) error {
 	}
 	clusterMgr := cluster.NewManager(lib)
 
+	rootsPath, err := platform.WatchedRootsPath()
+	if err != nil {
+		return fmt.Errorf("resolving watched roots path: %w", err)
+	}
+	roots, err := watchroots.Open(rootsPath)
+	if err != nil {
+		// A corrupt file isn't fatal — we warn and carry on with an
+		// empty list. First /api/scan will rewrite the file cleanly.
+		slog.Warn("loading watched roots failed; starting empty", "path", rootsPath, "err", err)
+	}
+
 	// Video frame extraction shells out to ffmpeg when present;
 	// missing ffmpeg falls back to a placeholder thumbnail so the
 	// library remains identical across hosts that have it and don't.
@@ -215,18 +227,20 @@ func run(devMode bool, bind string, logPath string) error {
 				slog.Error("post-scan save failed", "path", metaPath, "err", err)
 			}
 		},
+		// RootRegistrar fans batches of discovered directories out to
+		// watchroots.Store as the parallel walker visits them, so a
+		// freshly-added top-level folder decomposes into per-directory
+		// sub-roots without a separate pre-walk. Only fires for
+		// full-intensity user scans.
+		RootRegistrar: func(origin string, dirs []string) {
+			if roots == nil {
+				return
+			}
+			if err := roots.UpsertTree(origin, dirs); err != nil {
+				slog.Warn("root registrar: UpsertTree failed", "origin", origin, "err", err)
+			}
+		},
 	})
-
-	rootsPath, err := platform.WatchedRootsPath()
-	if err != nil {
-		return fmt.Errorf("resolving watched roots path: %w", err)
-	}
-	roots, err := watchroots.Open(rootsPath)
-	if err != nil {
-		// A corrupt file isn't fatal — we warn and carry on with an
-		// empty list. First /api/scan will rewrite the file cleanly.
-		slog.Warn("loading watched roots failed; starting empty", "path", rootsPath, "err", err)
-	}
 
 	settingsPath, err := platform.SettingsPath()
 	if err != nil {
@@ -357,11 +371,42 @@ func run(devMode bool, bind string, logPath string) error {
 	defer stopAutoSave()
 	go autoSaveLoop(autoSaveCtx, lib, metaPath, autoSaveInterval)
 
-	// Background rescanner: periodically re-walks every watched root
-	// in low-intensity mode so files added or removed outside Kestrel
-	// flow into the library without the user having to remember. Runs
-	// on the same shutdown context as the rest of the process so ^C
-	// drains cleanly.
+	// One-time migration of legacy watchroots entries — those still in
+	// the pre-decomposition flat schema where each watched root is a
+	// single entry with no descendant sub-roots. We walk every such
+	// top-level and call UpsertTree so the new fsnotify watcher and
+	// the per-directory scheduler model start with the right state.
+	// Done in a background goroutine: a huge tree shouldn't block the
+	// HTTP server from coming up.
+	if roots != nil {
+		go migrateLegacyRoots(roots)
+	}
+
+	// Filesystem watcher: fast path for new files. Each watched
+	// sub-root gets a non-recursive fsnotify watch; events trigger
+	// debounced low-intensity rescans of just that directory. Started
+	// before the scheduler so an event arriving during the scheduler's
+	// first wait still gets reacted to. If construction fails (rare —
+	// e.g. fsnotify can't open the kqueue/inotify FD) we log and
+	// continue with the scheduler-only fallback.
+	watcherCtx, stopWatcher := context.WithCancel(context.Background())
+	defer stopWatcher()
+	if roots != nil {
+		fsWatcher, err := watcher.New(watcher.Config{
+			Store:  roots,
+			Runner: runner,
+		})
+		if err != nil {
+			slog.Warn("filesystem watcher unavailable; relying on periodic scheduler", "err", err)
+		} else {
+			go fsWatcher.Run(watcherCtx)
+		}
+	}
+
+	// Background rescanner: periodically re-walks every watched
+	// sub-root in low-intensity mode as a backstop for missed watcher
+	// events and to drive deletion pruning. Runs on the same shutdown
+	// context as the rest of the process so ^C drains cleanly.
 	scheduler := rescan.New(rescan.Config{
 		Roots:     roots,
 		Runner:    runner,
@@ -625,4 +670,59 @@ func watchBrowserLifecycle(
 			}
 		}
 	}
+}
+
+// migrateLegacyRoots expands any pre-decomposition entry — a top-level
+// folder with no descendant sub-roots in the store — into the
+// per-directory sub-root model the rest of the system now expects. A
+// no-op for already-decomposed stores.
+func migrateLegacyRoots(roots *watchroots.Store) {
+	all := roots.List()
+	originHasChildren := map[string]bool{}
+	for _, r := range all {
+		if r.Origin != "" && r.Origin != r.Path {
+			originHasChildren[r.Origin] = true
+		}
+	}
+	for _, r := range all {
+		if r.Origin != "" && r.Origin != r.Path {
+			continue // descendant, not a top-level
+		}
+		if originHasChildren[r.Path] {
+			continue // already decomposed
+		}
+		dirs := walkDirsFor(r.Path)
+		if len(dirs) <= 1 {
+			continue
+		}
+		if err := roots.UpsertTree(r.Path, dirs); err != nil {
+			slog.Warn("legacy roots migration: UpsertTree failed", "root", r.Path, "err", err)
+			continue
+		}
+		slog.Info("legacy roots migration: decomposed", "root", r.Path, "subroots", len(dirs))
+	}
+}
+
+// walkDirsFor returns every directory at or under root. Errors on
+// individual subtrees are logged and skipped — partial decomposition
+// is better than aborting and leaving the user without watcher
+// coverage at all.
+func walkDirsFor(root string) []string {
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && scanner.ShouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn("legacy roots migration: walk failed", "root", root, "err", err)
+	}
+	return dirs
 }
