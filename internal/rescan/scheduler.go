@@ -28,12 +28,20 @@ import (
 
 // Default cadence. Conservative on purpose — the feature exists so
 // the library stays roughly accurate, not so it reflects filesystem
-// edits within seconds.
+// edits within seconds. The watcher carries the fast path for new
+// files; this scheduler is a backstop and the deletion-pruner.
+//
+// DefaultWarmup fires the first cycle shortly after process start so
+// the binary acts as "repair the archive" on launch — without this,
+// a freshly-launched process waits a full Interval (30 min) before
+// touching anything, which is how the user ended up with three-day-
+// old roots whose LastScannedAt was still zero.
 const (
 	DefaultInterval      = 30 * time.Minute
 	DefaultIdleThreshold = 2 * time.Minute
 	DefaultPerRootGap    = 5 * time.Second
 	DefaultThrottleSleep = 10 * time.Millisecond
+	DefaultWarmup        = 30 * time.Second
 )
 
 // Activity is the subset of server.Activity the scheduler reads.
@@ -62,6 +70,7 @@ type Config struct {
 	Interval      time.Duration
 	IdleThreshold time.Duration
 	PerRootGap    time.Duration
+	Warmup        time.Duration
 
 	// Workers and ThrottleSleep control the low-intensity posture.
 	// Zero Workers → runtime.NumCPU()/4 (at least 1). Zero
@@ -89,6 +98,11 @@ func New(cfg Config) *Scheduler {
 	if cfg.PerRootGap < 0 {
 		cfg.PerRootGap = DefaultPerRootGap
 	}
+	if cfg.Warmup < 0 {
+		cfg.Warmup = 0
+	} else if cfg.Warmup == 0 {
+		cfg.Warmup = DefaultWarmup
+	}
 	if cfg.ThrottleSleep <= 0 {
 		cfg.ThrottleSleep = DefaultThrottleSleep
 	}
@@ -103,10 +117,23 @@ func New(cfg Config) *Scheduler {
 }
 
 // Run blocks until ctx is cancelled, executing one rescan cycle per
-// tick. The very first tick fires after Interval, not immediately,
-// so a freshly-started process doesn't compete with the user's
-// startup interactions.
+// tick. A short warmup cycle fires soon after start to "repair the
+// archive" — picking up any disk drift that accumulated while the
+// process was off — and then the regular Interval cadence takes
+// over. Set Warmup to a negative value at construction time to
+// disable the warmup tick (used by tests that don't want startup
+// noise).
 func (s *Scheduler) Run(ctx context.Context) {
+	if s.cfg.Warmup > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(s.cfg.Warmup):
+			slog.Info("rescan: warmup cycle starting")
+			s.cycle(ctx)
+		}
+	}
+
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
 
@@ -120,22 +147,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// cycle runs one pass over every watched root, subject to idle and
-// busy gates. Any error in one root is logged and skipped — the next
-// cycle gets another chance.
+// cycle runs one pass over every watched root. The idle gate and the
+// busy gate are checked per-root rather than once at the top: a brief
+// burst of user activity in the middle of a cycle should pause the
+// loop until the user settles, not abandon the whole pass — and the
+// watcher's debounced rescans must not be able to starve the
+// scheduler indefinitely. Any error in one root is logged and skipped;
+// the next cycle gets another chance.
 func (s *Scheduler) cycle(ctx context.Context) {
 	if s.cfg.Roots == nil || s.cfg.Runner == nil || s.cfg.Library == nil {
-		return
-	}
-	if s.cfg.Activity != nil {
-		since := time.Since(s.cfg.Activity.LastActive())
-		if since < s.cfg.IdleThreshold {
-			slog.Info("rescan: user active recently, skipping cycle", "since", since)
-			return
-		}
-	}
-	if id, _ := s.cfg.Runner.Active(); id != "" {
-		slog.Info("rescan: scan already running, skipping cycle", "id", id)
 		return
 	}
 
@@ -145,11 +165,19 @@ func (s *Scheduler) cycle(ctx context.Context) {
 	})
 	slog.Info("rescan cycle starting", "roots", len(roots))
 
+	var processed, skipped int
 	for _, root := range roots {
 		if ctx.Err() != nil {
 			return
 		}
+
+		if !s.waitUntilEligible(ctx, root.Path) {
+			skipped++
+			continue
+		}
+
 		s.rescanOne(ctx, root.Path)
+		processed++
 
 		if s.cfg.PerRootGap > 0 {
 			select {
@@ -157,6 +185,46 @@ func (s *Scheduler) cycle(ctx context.Context) {
 				return
 			case <-time.After(s.cfg.PerRootGap):
 			}
+		}
+	}
+	slog.Info("rescan cycle finished", "processed", processed, "skipped", skipped)
+}
+
+// waitUntilEligible blocks until the user has been idle for at least
+// IdleThreshold and the runner has no active scan, or until ctx is
+// cancelled. Returns true once the gate is open. Bounded by the cycle
+// interval so a perpetually-active user can't pin the goroutine —
+// after one Interval of waiting we give up on this root and let the
+// outer loop move on.
+func (s *Scheduler) waitUntilEligible(ctx context.Context, root string) bool {
+	deadline := time.Now().Add(s.cfg.Interval)
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if time.Now().After(deadline) {
+			slog.Info("rescan: gave up waiting for idle/free runner", "root", root)
+			return false
+		}
+		idleOK := true
+		if s.cfg.Activity != nil {
+			since := time.Since(s.cfg.Activity.LastActive())
+			if since < s.cfg.IdleThreshold {
+				idleOK = false
+			}
+		}
+		busyID, _ := s.cfg.Runner.Active()
+		if idleOK && busyID == "" {
+			return true
+		}
+
+		// Short polling sleep — a few hundred ms keeps the wait
+		// responsive without burning CPU. The scheduler is not a
+		// latency-sensitive component.
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }

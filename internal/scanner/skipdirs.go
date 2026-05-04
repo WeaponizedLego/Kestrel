@@ -22,6 +22,29 @@ var skipDirNames = map[string]struct{}{
 	"vendor":       {},
 }
 
+// skipDirSuffixes are macOS-style "package" directory suffixes — names
+// the OS treats as opaque files even though they're directories on
+// disk. Application bundles (.app, .bundle, .framework, .kext, .xpc),
+// Apple media libraries (.photoslibrary, .musiclibrary, .tvlibrary,
+// .aplibrary), and the like never contain user-visible photo files
+// the user would expect Kestrel to manage. Skipping them prevents
+// scenarios like "I deleted a sound file from inside an .app bundle
+// and broke the application." Suffix match is case-insensitive
+// because macOS filesystems usually are.
+var skipDirSuffixes = []string{
+	".app",
+	".bundle",
+	".framework",
+	".kext",
+	".xpc",
+	".plugin",
+	".photoslibrary",
+	".musiclibrary",
+	".tvlibrary",
+	".aplibrary",
+	".photolibrary",
+}
+
 // ShouldSkipDir reports whether a directory name should be excluded
 // from scans, decomposition, and watching. Hidden directories (names
 // starting with ".") are always skipped — they are conventionally
@@ -34,8 +57,16 @@ func ShouldSkipDir(name string) bool {
 	if strings.HasPrefix(name, ".") && name != "." && name != ".." {
 		return true
 	}
-	_, skip := skipDirNames[name]
-	return skip
+	if _, skip := skipDirNames[name]; skip {
+		return true
+	}
+	lower := strings.ToLower(name)
+	for _, suffix := range skipDirSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // PathHasSkippedComponent reports whether any segment of path matches
