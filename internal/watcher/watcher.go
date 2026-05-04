@@ -122,7 +122,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	// from before this filter existed; honouring it here prevents the
 	// next launch from repeating an FD-exhaustion meltdown.
 	for _, r := range w.cfg.Store.List() {
-		if scanner.PathHasSkippedComponent(r.Path) {
+		if scanner.PathHasSkippedComponent(r.Path) || scanner.IsSystemPath(r.Path) {
 			continue
 		}
 		w.addWatch(r.Path, r.Origin)
@@ -189,7 +189,7 @@ func (w *Watcher) addWatch(path, origin string) {
 	if w.exhausted.Load() {
 		return
 	}
-	if scanner.PathHasSkippedComponent(path) {
+	if scanner.PathHasSkippedComponent(path) || scanner.IsSystemPath(path) {
 		return
 	}
 	w.mu.Lock()
@@ -288,6 +288,9 @@ func (w *Watcher) registerNewSubtree(root, origin string) {
 	if w.cfg.Store.IsIgnored(root) {
 		return
 	}
+	if scanner.IsSystemPath(root) {
+		return
+	}
 	var dirs []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -297,6 +300,9 @@ func (w *Watcher) registerNewSubtree(root, origin string) {
 			return nil
 		}
 		if path != root && scanner.ShouldSkipDir(d.Name()) {
+			return filepath.SkipDir
+		}
+		if scanner.IsSystemPath(path) {
 			return filepath.SkipDir
 		}
 		if w.cfg.Store.IsIgnored(path) {

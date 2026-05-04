@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// permissionDeniedCounter is shared between walker variants so that a
+// single "skipped N unreadable dirs" summary line can replace what was
+// previously one Warn per dir. It's a pointer-sized counter passed by
+// reference; lifetimes match a single walk invocation.
+type permissionDeniedCounter = atomic.Int64
+
 // dirsFoundFlushEvery and dirsFoundFlushInterval bound how aggressively
 // the BFS walker fans discovered directories out to OnDirsFound. The
 // flusher fires whichever boundary it hits first so a slow walk still
@@ -74,9 +80,18 @@ func walkPathsBFS(ctx context.Context, root string, paths chan<- string, opts wa
 	dirs := make(chan string, dirQueueSize)
 	var outstanding atomic.Int64
 	var fileCount atomic.Int64
+	var denied permissionDeniedCounter
 
 	flusher := newDirsFoundFlusher(opts.OnDirsFound)
 	defer flusher.close()
+
+	// If the root itself is system-denylisted, refuse cleanly — the
+	// caller should have rejected at the API edge, but the walker is
+	// the last line of defense.
+	if IsSystemPath(root) {
+		slog.Info("scan walk skipped (system path)", "root", root)
+		return 0, nil
+	}
 
 	// Seed with root itself.
 	flusher.add(root)
@@ -107,7 +122,7 @@ func walkPathsBFS(ctx context.Context, root string, paths chan<- string, opts wa
 					if !ok {
 						return
 					}
-					if err := walkOneDir(ctx, dir, dirs, paths, &outstanding, &fileCount, flusher); err != nil {
+					if err := walkOneDir(ctx, dir, dirs, paths, &outstanding, &fileCount, &denied, flusher); err != nil {
 						if !errors.Is(err, context.Canceled) {
 							recordErr(err)
 						}
@@ -126,6 +141,9 @@ func walkPathsBFS(ctx context.Context, root string, paths chan<- string, opts wa
 
 	wg.Wait()
 
+	if d := denied.Load(); d > 0 {
+		slog.Info("walk: skipped unreadable dirs", "root", root, "denied", d)
+	}
 	if err := ctx.Err(); err != nil {
 		slog.Info("scan walk cancelled", "root", root, "queued", fileCount.Load())
 		return int(fileCount.Load()), err
@@ -150,14 +168,22 @@ func walkOneDir(
 	paths chan<- string,
 	outstanding *atomic.Int64,
 	fileCount *atomic.Int64,
+	denied *permissionDeniedCounter,
 	flusher *dirsFoundFlusher,
 ) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// A single unreadable directory must not abort the entire
 		// walk — log and skip, matching the scanner's "skip unreadable
-		// files" stance.
-		slog.Warn("walk: reading dir failed", "dir", dir, "err", err)
+		// files" stance. EPERM is expected on macOS TCC-protected dirs
+		// and on any cross-user directory; downgrade to Debug and just
+		// count it for the per-walk summary line.
+		if errors.Is(err, fs.ErrPermission) {
+			denied.Add(1)
+			slog.Debug("walk: reading dir denied", "dir", dir, "err", err)
+		} else {
+			slog.Warn("walk: reading dir failed", "dir", dir, "err", err)
+		}
 		return nil
 	}
 
@@ -168,6 +194,9 @@ func walkOneDir(
 		full := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
 			if ShouldSkipDir(entry.Name()) {
+				continue
+			}
+			if IsSystemPath(full) {
 				continue
 			}
 			flusher.add(full)
@@ -218,9 +247,25 @@ func walkPathsSingle(ctx context.Context, root string, paths chan<- string, opts
 	flusher := newDirsFoundFlusher(opts.OnDirsFound)
 	defer flusher.close()
 
+	if IsSystemPath(root) {
+		slog.Info("scan walk skipped (system path)", "root", root)
+		return 0, nil
+	}
+
 	var count int
+	var denied int64
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Permission-denied on a directory or file: skip the
+			// subtree silently, count it for the summary line.
+			if errors.Is(err, fs.ErrPermission) {
+				denied++
+				slog.Debug("walk: reading path denied", "path", path, "err", err)
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return fmt.Errorf("walking %s: %w", path, err)
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -228,6 +273,9 @@ func walkPathsSingle(ctx context.Context, root string, paths chan<- string, opts
 		}
 		if d.IsDir() {
 			if path != root && ShouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if path != root && IsSystemPath(path) {
 				return filepath.SkipDir
 			}
 			flusher.add(path)
@@ -244,6 +292,9 @@ func walkPathsSingle(ctx context.Context, root string, paths chan<- string, opts
 			return ctx.Err()
 		}
 	})
+	if denied > 0 {
+		slog.Info("walk: skipped unreadable dirs", "root", root, "denied", denied)
+	}
 	if err != nil {
 		slog.Info("scan walk ended", "root", root, "queued", count, "err", err)
 	} else {

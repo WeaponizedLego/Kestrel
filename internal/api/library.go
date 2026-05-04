@@ -1138,6 +1138,10 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "folder is required")
 		return
 	}
+	if scanner.IsSystemPath(req.Folder) {
+		writeError(w, http.StatusBadRequest, "Kestrel won't scan system folders. Pick a user folder like ~/Pictures.")
+		return
+	}
 
 	id, err := h.runner.Start(req.Folder)
 	if errors.Is(err, scanner.ErrScanInProgress) {

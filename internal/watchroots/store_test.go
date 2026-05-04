@@ -159,6 +159,49 @@ func TestLegacyArrayFormatLoads(t *testing.T) {
 	}
 }
 
+func TestOpenWithFilterDropsAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watchroots.json")
+
+	// Seed with three roots; the filter will drop /sys/* entries.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.UpsertTree("/data", []string{"/data", "/data/photos"}); err != nil {
+		t.Fatalf("UpsertTree photos: %v", err)
+	}
+	if err := s.UpsertTree("/sys/junk", []string{"/sys/junk"}); err != nil {
+		t.Fatalf("UpsertTree sys: %v", err)
+	}
+
+	shouldDrop := func(p string) bool {
+		return p == "/sys/junk"
+	}
+	s2, err := OpenWithFilter(path, shouldDrop)
+	if err != nil {
+		t.Fatalf("OpenWithFilter: %v", err)
+	}
+	got := s2.List()
+	if len(got) != 2 {
+		t.Fatalf("len roots after filter: want 2, got %d", len(got))
+	}
+	for _, r := range got {
+		if r.Path == "/sys/junk" {
+			t.Errorf("filtered path should be gone, found %q", r.Path)
+		}
+	}
+
+	// Re-open without filter and confirm cleanup is durable.
+	s3, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after filter: %v", err)
+	}
+	if got := len(s3.List()); got != 2 {
+		t.Errorf("durability: want 2 entries on disk, got %d", got)
+	}
+}
+
 func TestFlushUsesObjectFormat(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Upsert("/a"); err != nil {

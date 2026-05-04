@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,6 +70,16 @@ type Store struct {
 // and overwritten on the next mutation; we warn via the returned
 // error so the caller can log it.
 func Open(path string) (*Store, error) {
+	return OpenWithFilter(path, nil)
+}
+
+// OpenWithFilter behaves like Open but additionally drops any loaded
+// root for which shouldDrop(path) returns true. Used by main to purge
+// system-path / build-artefact entries that the auto-decomposition
+// must never have introduced. A nil shouldDrop is a no-op (equivalent
+// to Open). When entries are dropped the store is flushed once so the
+// cleanup is durable.
+func OpenWithFilter(path string, shouldDrop func(string) bool) (*Store, error) {
 	s := &Store{path: path, subs: map[int]Subscriber{}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -99,6 +110,24 @@ func Open(path string) (*Store, error) {
 	for i := range s.roots {
 		if s.roots[i].Origin == "" {
 			s.roots[i].Origin = s.roots[i].Path
+		}
+	}
+	if shouldDrop != nil {
+		kept := s.roots[:0]
+		var dropped int
+		for _, r := range s.roots {
+			if shouldDrop(r.Path) {
+				dropped++
+				continue
+			}
+			kept = append(kept, r)
+		}
+		s.roots = kept
+		if dropped > 0 {
+			slog.Info("watchroots: cleanup dropped entries", "path", s.path, "dropped", dropped)
+			if flushErr := s.flushLocked(); flushErr != nil {
+				return s, fmt.Errorf("flushing cleanup of %s: %w", s.path, flushErr)
+			}
 		}
 	}
 	return s, nil

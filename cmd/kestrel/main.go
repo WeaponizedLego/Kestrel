@@ -190,7 +190,13 @@ func run(devMode bool, bind string, logPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolving watched roots path: %w", err)
 	}
-	roots, err := watchroots.Open(rootsPath)
+	// Drop entries that the auto-decomposition must never have
+	// introduced (system paths, build-artefact subtrees). Heals existing
+	// pollution from previous launches in one pass on startup.
+	rootsFilter := func(p string) bool {
+		return scanner.IsSystemPath(p) || scanner.PathHasSkippedComponent(p)
+	}
+	roots, err := watchroots.OpenWithFilter(rootsPath, rootsFilter)
 	if err != nil {
 		// A corrupt file isn't fatal — we warn and carry on with an
 		// empty list. First /api/scan will rewrite the file cleanly.
