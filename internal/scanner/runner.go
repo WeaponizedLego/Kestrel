@@ -36,9 +36,10 @@ var ErrScanInProgress = errors.New("a scan is already in progress")
 // committed before the cancel — the user doesn't lose hours of
 // hashing work by clicking Stop on a multi-TB run.
 type Runner struct {
-	lib      Library
-	opts     Options
-	onFinish func(added int, cancelled bool)
+	lib           Library
+	opts          Options
+	onFinish      func(added int, cancelled bool)
+	rootRegistrar func(origin string, dirs []string)
 
 	mu     sync.Mutex
 	active *scanHandle
@@ -73,6 +74,14 @@ type RunnerConfig struct {
 	// and to invalidate the cluster cache so the next Tagging Queue
 	// query reflects freshly-hashed photos.
 	OnFinish func(added int, cancelled bool)
+
+	// RootRegistrar, when non-nil, is wired up as Options.OnDirsFound
+	// for full-intensity (user-triggered) scans only — the runner
+	// passes the scan's root as origin so a freshly-added top-level
+	// folder decomposes into per-directory sub-roots as the walker
+	// finds them. Background and watcher-triggered low-intensity
+	// scans skip this; the watcher decomposes its own dynamic dirs.
+	RootRegistrar func(origin string, dirs []string)
 }
 
 // NewRunner returns a Runner configured with the given deps. The
@@ -86,7 +95,8 @@ func NewRunner(cfg RunnerConfig) *Runner {
 			Thumbnailer: cfg.Thumbnailer,
 			Autotag:     cfg.Autotag,
 		},
-		onFinish: cfg.OnFinish,
+		onFinish:      cfg.OnFinish,
+		rootRegistrar: cfg.RootRegistrar,
 	}
 }
 
@@ -129,6 +139,11 @@ func (r *Runner) start(root, intensity string, opts Options, preempt bool) (stri
 		if err := r.PreemptLowIntensity(); err != nil {
 			return "", err
 		}
+	}
+
+	if intensity == IntensityNormal && r.rootRegistrar != nil {
+		registrar := r.rootRegistrar
+		opts.OnDirsFound = func(dirs []string) { registrar(root, dirs) }
 	}
 
 	r.mu.Lock()

@@ -1138,6 +1138,10 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "folder is required")
 		return
 	}
+	if scanner.IsSystemPath(req.Folder) {
+		writeError(w, http.StatusBadRequest, "Kestrel won't scan system folders. Pick a user folder like ~/Pictures.")
+		return
+	}
 
 	id, err := h.runner.Start(req.Folder)
 	if errors.Is(err, scanner.ErrScanInProgress) {
@@ -1153,20 +1157,14 @@ func (h *LibraryHandler) scan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Record this folder as a watched root so the background
-	// rescanner keeps it in sync with disk going forward. Skip the
-	// upsert when the folder already sits inside an existing root —
-	// the scheduler will cover it via the parent, and littering
-	// watchroots.json with nested subtrees just slows every cycle
-	// down. Failure during a legitimate upsert must not block the
-	// scan itself — the user's immediate action succeeds, and they
-	// can retry via a second scan if the disk write was transient.
-	if h.roots != nil && !h.isCoveredByExistingRoot(req.Folder) {
-		if err := h.roots.Upsert(req.Folder); err != nil {
-			// Logged at the handler layer rather than returned so a
-			// read-only home dir or similar never breaks scanning.
-			// The scheduler just won't see this root until the store
-			// is writable again.
+	// Record the folder as a watched root immediately so the user's
+	// add is durable even if the scan never progresses. The scanner's
+	// OnDirsFound callback will decompose every descendant directory
+	// into its own sub-root as the walker discovers it; the eager
+	// Upsert here just makes the top-level visible right away.
+	// Failure to write must not block the scan itself.
+	if h.roots != nil {
+		if err := h.roots.UpsertTree(req.Folder, []string{req.Folder}); err != nil {
 			writeJSON(w, http.StatusAccepted, scanResponse{ID: id, Root: req.Folder})
 			return
 		}
